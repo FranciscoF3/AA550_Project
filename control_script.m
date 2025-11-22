@@ -76,7 +76,7 @@ function target_ref = reference_sampling(ref, robot)
     target_ref.phi_dot = ref.phi_dot(idx);
 end
 
-function [Ad, Bd, Cd] = linearize_discretize(z_r, u_r, dt, params)
+function [Ad, Bd, Cd] = linearize_discretize(z_r, u_r, ds, params)
     
     [A_r, B_r, f_r] = compute_jacobians(z_r, u_r, params);
     
@@ -93,7 +93,7 @@ function [Ad, Bd, Cd] = linearize_discretize(z_r, u_r, dt, params)
     % top right block I
     M_big(1:nz, nz+1:2*nz) = eye(nz);
 
-    M = expm(M_big *dt);
+    M = expm(M_big *ds);
 
     M11 = M(1:nz,1:nz);
     M12 = M(1:nz, nz+1:2*nz);
@@ -103,9 +103,10 @@ function [Ad, Bd, Cd] = linearize_discretize(z_r, u_r, dt, params)
     Bd = M12 * B_r; %B'=M12*B
     Cd = M12 * C_r; % C'=M12*C
    
-    
+     
 end
 
+%%%
 function [A_r, B_r, f_r] = compute_jacobians(z_r, u_r, params)
 
 %Compute_Jacobians
@@ -193,7 +194,7 @@ function [A_r, B_r, f_r] = compute_jacobians(z_r, u_r, params)
 end
 
 
-
+%%
 end
 
 function robot = robot_state_update(robot, u)
@@ -221,9 +222,9 @@ function robot = robot_state_update(robot, u)
     ay_dot      = jy;
 
 
-    robot.x_cur = 
-    robot.y_cur =
-    robot.phi_cur = 
+    robot.x_cur = xr - ey*sin(phi_r);
+    robot.y_cur = yr + ey*cos(phi_r);
+    robot.phi_cur = phi_r + ephi;
     robot.v_x_cur =
     robot.v_y_cur =
     robot.a_x_cur = 
