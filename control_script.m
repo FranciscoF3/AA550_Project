@@ -80,14 +80,30 @@ function [Ad, Bd, Cd] = linearize_discretize(z_r, u_r, dt, params)
     
     [A_r, B_r, f_r] = compute_jacobians(z_r, u_r, params);
     
+    %compute C_r
     C_r = f_r - A_r*z_r -B_r*u_r;
-    nz = length(z_r);
-    nu = length(u_r);
+
+
+    %%% Auxillary Matrix
+    M_big = zeros(nz*2);
+
+    % top left block A
+    M_big(1:nz, 1:nz) = A_r;
+
+    % top right block I
+    M_big(1:nz, nz+1:2*nz) = eye(nz);
+
+    M = expm(M_big *dt);
+
+    M11 = M(1:nz,1:nz);
+    M12 = M(1:nz, nz+1:2*nz);
+
+    % Discrete matrices
+    Ad = M11;   % A'=exp(A dt)
+    Bd = M12 * B_r; %B'=M12*B
+    Cd = M12 * C_r; % C'=M12*C
+   
     
-    % Extract blocks
-    Ad = Md(1:nz, 1:nz);
-    Bd = Md(1:nz, nz+1:nz+nu);
-    Cd = Md(1:nz, nz+nu+1);
 end
 
 function [A_r, B_r, f_r] = compute_jacobians(z_r, u_r, params)
