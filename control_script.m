@@ -5,34 +5,55 @@
 
 
 %%%// << Main MPC Loop >> //%%%
-
-[ref] = reference_trajectory();
+[mpc,sim] = init_params();
+ref  = reference_trajectory(sim);
 params = struct();
-params.rho_s = ref.rho;
+params.rho_s = ref.rho; %circle radius R
 
-ds = ref.s(2) - ref.s(1);
+ds = sim.ds;
 
 
 %INitial robot position
-robot.x_cur = ref.xr(1);
-robot.y_cur = ref.yr(1);
+robot.x_cur  = ref.xr(1);
+robot.y_cur  = ref.yr(1);
+robot.phi_cur = ref.phi_r(1);
 
 % initial error state and input
-z = zeros(7,1);
-u = zeros(3,1);
+v_ref = ref.v_r(1);   % 0.5
+omega_ref = ref.phi_dot(1);
 
-steps = 300;
+z = [ 0;          % ey
+      0;          % ephi
+      v_ref;      % vx
+      0;          % vy
+      omega_ref;  % omega
+      0;          % ax
+      0 ];        % ay
+
+
+u = zeros(3,1);
+    
+
+steps = 1000;
 % Storage
 traj_x = zeros(1,steps);
 traj_y = zeros(1,steps);
-
+Q = diag([20 20 1 1 1 1 1]);
+R = diag([1 1 1]);
 for k = 1:steps
 
     %Step 1- Find the closest reference point
     ref_k = reference_sampling(ref, robot);
     
-    z_r = z;
-    u_r = u;
+    z_r = [0;
+       0;
+       ref_k.v_r;
+       0;
+       ref_k.phi_dot;
+       0;
+       0];
+
+    u_r = [0;0;0];
 
     %Step 1- linearize and discretize
     [Ad,Bd, Cd] = linearize_discretize(z_r, u_r, ds, params);
@@ -40,11 +61,11 @@ for k = 1:steps
     %Step 3- compute control
     %%%%// << temp weights >> /// %%%%%
     % 3. MPC weights (simple LQR for now)
-    Q = diag([20 20 1 1 0.1 0.1 0.1]);
-    R = diag([0.1 0.1 0.1]);
+
+
 
     [K_lqr, ~,~] = dlqr(Ad, Bd, Q, R);
-    u = -K_lqr*z;
+    u = -K_lqr*(z-z_r);
     
 
     % step 4: update nonlinear error state
@@ -59,52 +80,116 @@ for k = 1:steps
 end
 
 figure;
-hold on;
-plot(ref.xr, ref.yr, '--k');
-plot(traj_x, traj_y, 'r');
-title('robot following circular path');
+hold on; grid on; box on;
+
+% Plot reference circle
+plot(ref.xr, ref.yr, 'k--', 'LineWidth', 1.8);
+
+% Plot robot trajectory
+plot(traj_x, traj_y, 'r', 'LineWidth', 2);
+
+% Formatting
+xlabel('X Position (m)', 'FontSize', 12);
+ylabel('Y Position (m)', 'FontSize', 12);
+title('Robot Following a Circular Path', 'FontSize', 14);
+
+legend({'Reference Path', 'Robot Trajectory'}, 'Location', 'best');
+
+axis equal;        % Keep aspect ratio correct (circle looks like circle)
+axis padded;       % Add nice spacing around plot
+
+hold off;
 
 
 
-function ref = reference_trajectory()
-% Generate a reference circle path for MPC.
+function [mpc, sim] = init_params()
+    % ---------------------------------------------------------------------
+    % MPC parameters
+    % MPC sampling & horizon
+    % mpc.Ts = 0.1;   % [s]
+    mpc.Kh = 60;    % prediction horizon
+    mpc.Ch = 10;    % control horizon (<= Np) 
+
+    % % Cost weights (tuning)
+    % mpc.Wy    = 10;   % weight for lateral error ey
+    % mpc.Wpsi  = 10;   % weight for heading error epsi
+    % mpc.Wvx   = 1;
+    % mpc.Wvy   = 1;
+    % mpc.Wax   = 0.1;
+    % mpc.Way   = 0.1;
+    % mpc.Wpsi_dot = 1;
+    % 
+    % mpc.Wjx   = 0.01;
+    % mpc.Wjy   = 0.01;
+    % mpc.Wpsi_dd = 0.01;
+    % 
+    % % Input constraints (jerk / psi_ddot bounds)
+    % mpc.u_min = [-5; -5; -2];   % [jx_min; jy_min; psi_ddot_min]
+    % mpc.u_max = [ 5;  5;  2];
+    % 
+    % % State constraints (if corridor / slip / etc.)
+    % mpc.x_min = -inf(mpc.nx,1);
+    % mpc.x_max =  inf(mpc.nx,1);
+    
+    % ---------------------------------------------------------------------
+    % Simulation parameters
+    sim.ds = 0.01;      % s-domain scale resolution (meter)
+    sim.v_ref = 0.5;      % reference speed along s
+
+    sim.z0 = zeros(7,1);      % error state initial condition
+    
+    sim.z_dim = 7;      % state dimenstion
+    sim.u_dim = 3;      % control input dimension
+    sim.n_lap = 1;
+end
+
+function ref = reference_trajectory(sim)
+% Generate a reference circle path for MPC with given s-resolution and laps.
+% 
+% Args:
+%   sim: (struct).
+%        simulation config:
+%           sim.ds    - (float), resolution in s-domain ([meter] per step)
+%           sim.nLap  - (int)  , number of laps around the circle
+%           sim.v_ref - (float), reference speed along the path (m/s)
 % 
 % Returns:
-%   ref: (struct) containing a discretized reference trajectory for a 
-%   mobile robot. The path is defined as a circle with radius R in the 
-%   global Cartesian frame. The trajectory is parameterized by the 
-%   arc-length coordinate s, uniformly sampled with N points.
-% 
-%   The output struct 'ref' contains:
-%       ref.s        - 1×N vector, arc-length samples along the trajectory.
-%       ref.xr       - 1×N vector, x-coordinates in global frame.
-%       ref.yr       - 1×N vector, y-coordinates in global frame.
-%       ref.phi_r   - 1×N vector, reference heading (tangent direction).
-%       ref.v_r      - 1×N vector, reference forward speed profile.
-%       ref.phi_dot - 1×N vector, reference heading rate d(phi_r)/dt.
+%   ref: (struct).
+%        A discretized reference trajectory. The path is defined as a circle 
+%        with radius R in the global Cartesian frame. The trajectory is 
+%        parameterized by the arc-length coordinate s, uniformly sampled 
+%        with N points.
+%           ref.s        - (1×N vector), arc-length samples along the trajectory.
+%           ref.rho      - (1×N vector), circle path radius.
+%           ?ref.xr       - (1×N vector), x-coordinates in global frame.
+%           ?ref.yr       - (1×N vector), y-coordinates in global frame.
+%           ref.phi_r    - (1×N vector), reference heading (tangent direction).
+%           ref.v_r      - (float), reference forward speed profile.
+%           ref.phi_dot  - (float), reference angular velocity, d(phi_r)/dt. 
+    
+    % Initialize params from sim config
+    ds = sim.ds;        % s-domain resolution (meter)
+    n_lap = sim.n_lap;  % number of laps
+    v_ref = sim.v_ref;      % reference speed along s
 
-    % Path definition 
-    R = 5.0;            % radius (meter)
+    % ----- Reference path (circle) definition -----
+    R = 5.0;                   % radius [meter]
+    L_total = 2*pi*R * n_lap;  % total path length (multiple laps on the path)
 
-    % Discretize path and project to s-space
-    N = 1000;                   % sampling resolution of the reference table
-    s = linspace(0, 2*pi*R, N); % projected mobile robot's position along the path
+    % Discretize path
+    s = 0 : ds : L_total;
 
     % Coordinate transformation: s-plane to global Cartesian coordinates
-    xr = R * cos(s / R);
-    yr = R * sin(s / R);
+    theta = s / R;
+    xr = R * cos(theta);
+    yr = R * sin(theta);
 
-    % Reference heading
-    dx = gradient(xr);
-    dy = gradient(yr);
-    phi_r = atan2(dy, dx);
-
-
-    % Reference forward speed profile in s-plane
-    v_r = 0.5 * ones(1, N);   % constant velocity with 0.5 m/s
+    % Reference heading angle
+    phi_r = theta + pi/2;
+    phi_r = atan2(sin(phi_r), cos(phi_r));  % wrap to [-pi, pi]
     
     % Reference angular velocity
-    phi_dot = v_r / R;
+    phi_dot = v_ref / R;
 
     % Save into structure
     ref.s     = s;
@@ -112,7 +197,7 @@ function ref = reference_trajectory()
     ref.xr    = xr;
     ref.yr    = yr;
     ref.phi_r = phi_r;
-    ref.v_r   = v_r;
+    ref.v_r   = v_ref;
     ref.phi_dot = phi_dot;
 end
 
@@ -133,7 +218,7 @@ function target_ref = reference_sampling(ref, robot)
     % Find closest reference point
     [~, idx] = min(dist);
 
-    target_ref.xr          = ref.xr(idx);
+    target_ref.xr      = ref.xr(idx);
     target_ref.yr      = ref.yr(idx);
     target_ref.phi_r   = ref.phi_r(idx);
     target_ref.v_r     = ref.v_r(idx);
@@ -141,37 +226,34 @@ function target_ref = reference_sampling(ref, robot)
 end
 
 function [Ad, Bd, Cd] = linearize_discretize(z_r, u_r, ds, params)
-    
+
     [A_r, B_r, f_r] = compute_jacobians(z_r, u_r, params);
-    
-    %compute C_r
-    C_r = f_r - A_r*z_r -B_r*u_r;
-    
+    C_r = f_r - A_r*z_r - B_r*u_r;
+
     nz = length(z_r);
 
-    %%% Auxillary Matrix
-    M_big = zeros(nz*2);
+    % = exp(A Δs) 
+    Ad = expm(A_r * ds);
 
-    % top left block A
-    M_big(1:nz, 1:nz) = A_r;
+    % Build M = exp([A I; 0 0] ds
+    M_big = zeros(2*nz);
+    M_big(1:nz,       1:nz      ) = A_r;
+    M_big(1:nz,       nz+1:2*nz ) = eye(nz);
+    % lower block is already zero
 
-    % top right block I
-    M_big(1:nz, nz+1:2*nz) = eye(nz);
+    M = expm(M_big * ds);
 
-    M = expm(M_big *ds);
-
-    M11 = M(1:nz,1:nz);
     M12 = M(1:nz, nz+1:2*nz);
 
-    % Discrete matrices
-    Ad = M11;   % A'=exp(A dt)
-    Bd = M12 * B_r; %B'=M12*B
-    Cd = M12 * C_r; % C'=M12*C
-   
-     
+    %B' = M12 * B 
+    Bd = M12 * B_r;
+
+    %C' = M12 * C 
+    Cd = M12 * C_r;
+
 end
 
-%%%
+
 function [A_r, B_r, f_r] = compute_jacobians(z_r, u_r, params)
 
 %Compute_Jacobians
@@ -195,6 +277,9 @@ function [A_r, B_r, f_r] = compute_jacobians(z_r, u_r, params)
 
     % helper K
     K = vx*cos(ephi)-vy*sin(ephi);
+    if abs(K) < 0.3
+        K = 0.3;
+    end
 
     nz = length(z_r);
     nu = length(u_r);
@@ -254,10 +339,16 @@ function [A_r, B_r, f_r] = compute_jacobians(z_r, u_r, params)
     A_r(7,3) = -jy*(rho_s - ey)*cos(ephi) / (rho_s*K^2);
     A_r(7,4) =  jy*(rho_s - ey)*sin(ephi) / (rho_s*K^2);
     
- 
-    f_r = zeros(nz,1);
-end
+    f1 = (rho_s-ey)/rho_s*(vy*cos(ephi)+vx*sin(ephi))/(vx*cos(ephi-vy*sin(ephi)));                       % e_y'
+    f2 = omega*(rho_s-ey)/(rho_s*(vx*cos(ephi) - vy*sin(ephi)))-1/rho_s;           % e_phi'
+    f3 = ax;                                                      % v_x'
+    f4 = ay;                                                      % v_y'
+    f5 = alpha;                                                   % omega'
+    f6 = jx;                                                      % a_x'
+    f7 = jy;                                                      % a_y'
 
+    f_r = [f1; f2; f3; f4; f5; f6; f7];
+end
 
 function robot = robot_state_update(robot, z, ref_k)
 %/Update robot state through nonlinear dynamics model.
@@ -290,8 +381,9 @@ function robot = robot_state_update(robot, z, ref_k)
 
     
     % --- continuous-time dynamics ---
-    x_dot       = vx*cos(phi_r) - vy*sin(phi_r);
-    y_dot       = vx*sin(phi_r) + vy*cos(phi_r);
+    x_dot = vx*cos(robot.phi_cur) - vy*sin(robot.phi_cur);
+    y_dot = vx*sin(robot.phi_cur) + vy*cos(robot.phi_cur);
+
     %phi_dot_dot = phi_ddot;
 
     vx_dot      = ax*cos(phi_r) - ay*sin(phi_r);
@@ -308,7 +400,6 @@ function robot = robot_state_update(robot, z, ref_k)
     robot.omega = omega;
 end
 
-
 function z_next = nonlinear_step(z, u, ds, params)
     ey   = z(1);
     ephi = z(2);
@@ -324,10 +415,11 @@ function z_next = nonlinear_step(z, u, ds, params)
 
     rho_s = params.rho_s;
     K = vx*cos(ephi) - vy*sin(ephi);
-
-    % space-domain dynamics (very simple version)
-    f1 = (vx*sin(ephi) + vy*cos(ephi)) / K;              % e_y'
-    f2 = omega/rho_s - (vx*cos(ephi)-vy*sin(ephi))/K;    % e_phi'
+    if abs(K) < 0.3
+        K = 0.3;
+    end
+    f1 = (rho_s-ey)/rho_s*(vy*cos(ephi)+vx*sin(ephi))/(vx*cos(ephi-vy*sin(ephi)));                       % e_y'
+    f2 = omega*(rho_s-ey)/(rho_s*(vx*cos(ephi) - vy*sin(ephi)))-1/rho_s;    % e_phi'
     f3 = ax;                                             % v_x'
     f4 = ay;                                             % v_y'
     f5 = alpha;                                          % omega'
