@@ -1,16 +1,18 @@
-function u = mpc_solver(z0, ref_vr, Ad, Bd, Cd, mpc)
-% MPC_SOLVER  Quadprog-based MPC for space-based linearized model
-%
-%   z_{k+1} = Ad z_k + Bd u_k + Cd
+function u = New_MPC_solver_QP(z0, ref_vr, Ad, Bd, Cd, mpc)
+% New_MPC_solver_QP
+%   Quadprog-based MPC for space-based linearized model:
+%       z_{k+1} = Ad z_k + Bd u_k + Cd
 %
 %   States: z = [e_y; e_phi; v_x; v_y; w; a_x; a_y]
 %   Inputs: u = [alpha; j_x; j_y]
 %
-%   Cost (same structure as CVX version):
+%   Slacks: 5 per stage, one for each of z(1:5) (ey, ephi, vx, vy, w)
+%
+%   Cost:
 %     J = sum_{k=1..Kh} [
 %           W1*e_y(k)^2 + W2*e_phi(k)^2
 %         + (v(k)-v_r)' W3 (v(k)-v_r)
-%         + sigma(k)' W4 sigma(k)
+%         + sigma_k' W4 sigma_k      (5x1 slack)
 %         + W5 * ||u_k - u_{k-1}||^2
 %         ]
 %         + W6 * (e_y(Kh+1)^2 + e_phi(Kh+1)^2)
@@ -31,7 +33,7 @@ function u = mpc_solver(z0, ref_vr, Ad, Bd, Cd, mpc)
     W1 = mpc.W1;        % ey
     W2 = mpc.W2;        % ephi
     W3 = mpc.W3;        % 3x3 on [vx; vy; w]
-    W4 = mpc.W4;        % 2x2 on [sig_ey; sig_ephi]
+    W4 = mpc.W4;        % 5x5 on [z1..z5]
     W5 = mpc.W5;        % Δu
     W6 = mpc.W6;        % terminal ey,ephi
 
@@ -43,42 +45,26 @@ function u = mpc_solver(z0, ref_vr, Ad, Bd, Cd, mpc)
 
     v_r = ref_vr(:);    % [vx_ref; vy_ref; w_ref]
 
-    % Decision variable x = [U_stack; s_stack]
-    %   U_stack = [u_1; ...; u_K]        (m*K x 1)
-    %   s_stack = [sigma_1; ...; sigma_K] (2*K x 1; sigma = [sig_ey; sig_ephi])
+    % ---------- Decision variable x = [U_stack; s_stack] ----------
+    %   U_stack = [u_1; ...; u_K]          (m*K x 1)
+    %   s_stack = [sigma_1; ...; sigma_K]  (5*K x 1; sigma_k = [s1..s5])
     Nu = m*K;
-    Ns = 2*K;
+    Ns = 5*K;
     Nx = Nu + Ns;
 
-    % ---------- Precompute A^k and sums for lifted model ----------
-    % We want A_pows{k} = A^(k-1), k = 1..K+1
-    % and S_pows{k} = sum_{i=0}^{k-1} A^i
-    A_pows = cell(K+1,1);
-    S_pows = cell(K+1,1);
-
-    A_pows{1} = eye(n);      % A^0
-    S_pows{1} = eye(n);      % I = sum_{i=0}^0 A^i
-
-    for k = 2:K+1
-        A_pows{k} = Ad * A_pows{k-1};          % A^(k-1)
-        S_pows{k} = S_pows{k-1} + A_pows{k-1}; % sum_{i=0}^{k-1} A^i
+    % ---------- Precompute A^i and sums for lifted model ----------
+    % A_pows{j} = A^(j-1), j = 1..K+2  (so we have up to A^(K+1))
+    A_pows = cell(K+2,1);
+    A_pows{1} = eye(n);         % A^0
+    for j = 2:K+2
+        A_pows{j} = Ad * A_pows{j-1};  % A^(j-1)
     end
 
-    % Helper: for step k (1..K+1), get F_k, G_k such that
-    %   Z_k = G_k * U_stack + F_k
-    function [F_k, G_k] = getFG(k)
-        Ak = A_pows{k+1};    % A^k
-        Sk = S_pows{k};      % sum_{i=0}^{k-1} A^i
-
-        F_k = Ak * z0 + Sk * Cd;   % constant part
-
-        G_k = zeros(n, Nu);
-        % contribution from inputs u_1..u_min(k,K)
-        for j = 1:min(k,K)
-            Aj = A_pows{k-j+1};    % A^(k-j)
-            colsU = (j-1)*m + (1:m);
-            G_k(:, colsU) = Aj * Bd;
-        end
+    % S_pows{k} = sum_{i=0}^{k-1} A^i  (k = 1..K+1)
+    S_pows = cell(K+1,1);
+    S_pows{1} = eye(n);         % sum_{i=0}^0 A^i
+    for k = 2:K+1
+        S_pows{k} = S_pows{k-1} + A_pows{k};  % add A^(k-1)
     end
 
     % ---------- Build QP cost: 0.5 x'Hx + f'x ----------
@@ -91,9 +77,20 @@ function u = mpc_solver(z0, ref_vr, Ad, Bd, Cd, mpc)
     Q(2,2)     = W2;           % ephi
     Q(3:5,3:5) = W3;           % vx, vy, w
 
-    % 1) Stage costs for k = 1..K
+    % ===== 1) Stage costs for k = 1..K =====
     for k = 1:K
-        [F_k, G_k] = getFG(k);
+        % Compute F_k, G_k s.t. Z_k = G_k U + F_k
+        Ak = A_pows{k+1};      % A^k
+        Sk = S_pows{k};        % sum_{i=0}^{k-1} A^i
+
+        F_k = Ak * z0 + Sk * Cd;
+
+        G_k = zeros(n, Nu);
+        for j = 1:min(k,K)
+            Aj    = A_pows{k-j+1};  % A^(k-j)
+            colsU = (j-1)*m + (1:m);
+            G_k(:, colsU) = Aj * Bd;
+        end
 
         % reference state [0;0;v_r]
         z_ref = zeros(n,1);
@@ -110,13 +107,13 @@ function u = mpc_solver(z0, ref_vr, Ad, Bd, Cd, mpc)
         f(1:Nu)       = f(1:Nu)       + 2*GQE;
     end
 
-    % 2) Slack cost: sum_k sigma_k' W4 sigma_k
+    % ===== 2) Slack cost: sum_k sigma_k' W4 sigma_k (5x1 per stage) =====
     for k = 1:K
-        idx_s = Nu + (k-1)*2 + (1:2);  % indices of [sig_ey; sig_ephi] for stage k
+        idx_s = Nu + (k-1)*5 + (1:5);  % indices of sigmas for z(1:5) at stage k
         H(idx_s, idx_s) = H(idx_s, idx_s) + 2*W4;
     end
 
-    % 3) Δu cost: W5 * sum_k ||u_k - u_{k-1}||^2
+    % ===== 3) Δu cost: W5 * sum_k ||u_k - u_{k-1}||^2 =====
     for k = 1:K
         Ek = zeros(m, Nu);
         if k == 1
@@ -137,13 +134,25 @@ function u = mpc_solver(z0, ref_vr, Ad, Bd, Cd, mpc)
         f(1:Nu)       = f(1:Nu)       + 2*W5 * EkT_ec;
     end
 
-    % 4) Terminal cost: W6 * (ey_T^2 + ephi_T^2), T = K+1
-    [F_T, G_T] = getFG(K+1);       % Z_{K+1}
+    % ===== 4) Terminal cost: W6 * (ey_T^2 + ephi_T^2), T = K+1 =====
+    kT  = K+1;
+    AkT = A_pows{kT+1};           % A^(K+1)
+    SkT = S_pows{kT};             % sum_{i=0}^{K} A^i
+
+    F_T = AkT * z0 + SkT * Cd;
+
+    G_T = zeros(n, Nu);
+    for j = 1:K
+        AjT   = A_pows{kT-j+1};   % A^{K+1-j}
+        colsU = (j-1)*m + (1:m);
+        G_T(:, colsU) = AjT * Bd;
+    end
+
     Q_T = zeros(n);
     Q_T(1,1) = W6;
     Q_T(2,2) = W6;
 
-    E_T  = F_T;                    % error target = 0
+    E_T  = F_T;                   % terminal error target = 0
 
     QG_T  = Q_T * G_T;
     GQG_T = G_T' * QG_T;
@@ -154,16 +163,16 @@ function u = mpc_solver(z0, ref_vr, Ad, Bd, Cd, mpc)
 
     % ---------- Build inequality constraints Aineq x <= bineq ----------
     % 1) Input bounds u_min <= u_k <= u_max
-    % 2) Soft corridor for ey,ephi (with slack)
-    % 3) Hard bounds on z(3:7)
+    % 2) Soft corridor for z(1:5) with slacks
+    % 3) Hard bounds on z(6:7)
     % 4) Slack >= 0
 
-    max_rows = (2*m + 4 + 2*(n-2))*K + Ns;
+    max_rows = (2*m + 2*n + 5) * K;   % safe upper bound
     Aineq = zeros(max_rows, Nx);
     bineq = zeros(max_rows, 1);
     row = 0;
 
-    % 1) Input bounds
+    % ===== 1) Input bounds =====
     for k = 1:K
         cols_u = (k-1)*m + (1:m);
         for i = 1:m
@@ -178,64 +187,57 @@ function u = mpc_solver(z0, ref_vr, Ad, Bd, Cd, mpc)
         end
     end
 
-    % 2) State bounds via Z_k(U) = G_k U + F_k
+    % ===== 2) State bounds with slacks for z(1:5) & 3) hard for z(6:7) =====
     for k = 1:K
-        [F_k, G_k] = getFG(k);
+        Ak = A_pows{k+1};
+        Sk = S_pows{k};
 
-        % slack indices at stage k
-        idx_s1 = Nu + (k-1)*2 + 1;  % sig_ey
-        idx_s2 = Nu + (k-1)*2 + 2;  % sig_ephi
+        F_k = Ak * z0 + Sk * Cd;
 
-        % ey soft: z_min(1) - sig1 <= e_y <= z_max(1) + sig1
-        ey_rowU  = G_k(1,:);
-        ey_const = F_k(1);
+        G_k = zeros(n, Nu);
+        for j = 1:min(k,K)
+            Aj    = A_pows{k-j+1};
+            colsU = (j-1)*m + (1:m);
+            G_k(:, colsU) = Aj * Bd;
+        end
 
-        % lower: e_y >= z_min(1) - sig1  => -ey_rowU*U - sig1 <= -z_min(1) + ey_const
-        row = row+1;
-        Aineq(row, 1:Nu)   = -ey_rowU;
-        Aineq(row, idx_s1) = -1;
-        bineq(row)         = -z_min(1) + ey_const;
+        % soften z(1:5) with slacks
+        for i = 1:5
+            zi_rowU  = G_k(i,:);
+            zi_const = F_k(i);
+            idx_si   = Nu + (k-1)*5 + i;    % slack for state i at stage k
 
-        % upper: e_y <= z_max(1) + sig1  => ey_rowU*U - sig1 <= z_max(1) - ey_const
-        row = row+1;
-        Aineq(row, 1:Nu)   =  ey_rowU;
-        Aineq(row, idx_s1) = -1;
-        bineq(row)         =  z_max(1) - ey_const;
+            % lower: z_i >= z_min(i) - s_i => -zi_rowU*U - s_i <= -z_min(i) + zi_const
+            row = row+1;
+            Aineq(row, 1:Nu)    = -zi_rowU;
+            Aineq(row, idx_si)  = -1;
+            bineq(row)          = -z_min(i) + zi_const;
 
-        % ephi soft: z_min(2) - sig2 <= e_phi <= z_max(2) + sig2
-        ep_rowU  = G_k(2,:);
-        ep_const = F_k(2);
+            % upper: z_i <= z_max(i) + s_i => zi_rowU*U - s_i <= z_max(i) - zi_const
+            row = row+1;
+            Aineq(row, 1:Nu)    =  zi_rowU;
+            Aineq(row, idx_si)  = -1;
+            bineq(row)          =  z_max(i) - zi_const;
+        end
 
-        % lower
-        row = row+1;
-        Aineq(row, 1:Nu)   = -ep_rowU;
-        Aineq(row, idx_s2) = -1;
-        bineq(row)         = -z_min(2) + ep_const;
-
-        % upper
-        row = row+1;
-        Aineq(row, 1:Nu)   =  ep_rowU;
-        Aineq(row, idx_s2) = -1;
-        bineq(row)         =  z_max(2) - ep_const;
-
-        % hard bounds for z(3:7)
-        for i = 3:n
+        % hard bounds for z(6:7)
+        for i = 6:n
             zi_rowU  = G_k(i,:);
             zi_const = F_k(i);
 
-            % z_i >= z_min(i)  => -zi_rowU*U <= -z_min(i) + zi_const
+            % z_i >= z_min(i) => -zi_rowU*U <= -z_min(i) + zi_const
             row = row+1;
             Aineq(row, 1:Nu) = -zi_rowU;
             bineq(row)       = -z_min(i) + zi_const;
 
-            % z_i <= z_max(i)  => zi_rowU*U <= z_max(i) - zi_const
+            % z_i <= z_max(i) => zi_rowU*U <= z_max(i) - zi_const
             row = row+1;
             Aineq(row, 1:Nu) =  zi_rowU;
             bineq(row)       =  z_max(i) - zi_const;
         end
     end
 
-    % 4) Slack >= 0  =>  -sigma <= 0
+    % ===== 4) Slack >= 0  =>  -sigma <= 0 =====
     for i = 1:Ns
         row = row+1;
         Aineq(row, Nu+i) = -1;
