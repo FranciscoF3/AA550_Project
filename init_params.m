@@ -46,6 +46,11 @@ function [robot, mpc, sim] = init_params()
     % Friction / motor model parameters (optional, TODO)
     robot.Fc = 0;          % Coulomb friction (placeholder)
     robot.Fv = 0;          % Viscous friction (placeholder)
+
+    % Robot position (initialize at (0, -rho))
+    robot.x_cur   = 0;
+    robot.y_cur   = 0;
+    robot.phi_cur = 0;     % heading
     
     % ---------------------------------------------------------------------
     % MPC parameters

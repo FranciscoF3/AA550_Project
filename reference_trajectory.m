@@ -16,6 +16,8 @@ function ref = reference_trajectory(sim)
 %           with N points.
 %               ref.s        - (1×N vector), arc-length samples along the trajectory.
 %               ref.rho      - (float), circle path radius.
+%               ref.x_r      - (1×N vector), reference x position along the trajectory.
+%               ref.y_r      - (1×N vector), reference y position along the trajectory.
 %               ref.phi_r    - (1×N vector), reference heading (tangent direction).
 %               ref.v_r      - (float), reference forward speed profile.
 %               ref.phi_dot  - (float), reference angular velocity, d(phi_r)/dt. 
@@ -34,6 +36,8 @@ function ref = reference_trajectory(sim)
 
     % Coordinate transformation: s-plane to global Cartesian coordinates
     theta = s / R;
+    x_r = R * cos(theta);      % start from point on rightside
+    y_r = R * sin(theta);
 
     % Reference heading angle
     phi_r = theta + pi/2;
@@ -45,6 +49,8 @@ function ref = reference_trajectory(sim)
     % Save into structure
     ref.s     = s;
     ref.rho   = R;
+    ref.x_r   = x_r;
+    ref.y_r   = y_r;
     ref.phi_r = phi_r;
     ref.v_r   = v_ref;
     ref.phi_dot = phi_dot;

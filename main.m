@@ -22,9 +22,6 @@
 % Initialize params
 [robot, mpc, sim] = init_params();
 ds = sim.ds;      % s-domain scale resolution
-z  = zeros(mpc.z_dim, 1);      % initialize true error state
-    
-u  = zeros(3,1);     % initialize control input
 
 % Generate reference path
 ref = reference_trajectory(sim);
@@ -32,13 +29,22 @@ ref = reference_trajectory(sim);
 s = ref.s;      % s list, [0 : ds : S]
 N = numel(s);   % loop N times
 
+% Initialize robot state
+robot.x_cur = ref.x_r(1);
+robot.y_cur = ref.y_r(1);
+robot.phi_cur = ref.phi_r(1);
+
+% Initialize true error state & control input
+z  = zeros(mpc.z_dim, 1);      
+z(3) = ref.v_r;             % v_x(0) cannot be zero!
+u  = zeros(3,1);     
+
 % Declare log
 Z_log = zeros(mpc.z_dim, N);
 U_log = zeros(mpc.u_dim, N);
 t_log   = zeros(1, N);
 X_log   = zeros(1, N);
 Y_log   = zeros(1, N);
-phi_log = zeros(1, N);
 
 % Reference state, z_r, u_r
 z_r = [0;
@@ -51,7 +57,6 @@ z_r = [0;
 
 u_r = zeros(3,1);
 
-z(3) = ref.v_r;   
 
 % linearize & discretize for prediction model in MPC
 [Ad, Bd, Cd] = linearize_discretize(z_r, u_r, ds, ref);
@@ -60,18 +65,17 @@ t = 0;
 t_last_u = 0;
 control_period = mpc.Ts;   % = 0.1s
 
-
 last_percent = 0;
 
 % Start simulation
 for s_idx = 1: N
     
     % ====== debug: nonlinear model input ======
-    if any(~isfinite(z))
-        fprintf('[ERROR] z corrupted before MPC at step %d\n', s_idx);
-        disp(z.')
-        break
-    end
+    % if any(~isfinite(z))
+    %     fprintf('[ERROR] z corrupted before MPC at step %d\n', s_idx);
+    %     disp(z.')
+    %     break
+    % end
 
     % time increment in this step
     v_s   = z(3) * cos(z(2)) - z(4) * sin(z(2));  % same as f_continuous
@@ -85,49 +89,44 @@ for s_idx = 1: N
     t_log(s_idx) = t;
 
     if (t - t_last_u >= control_period)
-
+        
+        tic;
         % MPC
         u = mpc_solver(z, z_r, Ad, Bd, Cd, mpc);
+        t_solve = toc
 
         t_last_u = t;
     
-        if any(~isfinite(u))
-            fprintf('[ERROR] u is NaN at step %d\n', s_idx);
-        end
+        % if any(~isfinite(u))
+        %     fprintf('[ERROR] u is NaN at step %d\n', s_idx);
+        % end
     end
 
     % Update nonlinear Model from control input
     z_next = nonlinear_step(z, u, ds, ref);
 
-    % ====== debug: nonlinear model output ======
-    if any(~isfinite(z_next))
-        fprintf('[ERROR] nonlinear_step produced NaN at step %d\n', s_idx);
-        disp('z input:');
-        disp(z.')
-        disp('u input:');
-        disp(u.')
-        disp('z output:');
-        disp(z_next.')
-        break
-    end
+    % % ====== debug: nonlinear model output ======
+    % if any(~isfinite(z_next))
+    %     fprintf('[ERROR] nonlinear_step produced NaN at step %d\n', s_idx);
+    %     disp('z input:');
+    %     disp(z.')
+    %     disp('u input:');
+    %     disp(u.')
+    %     disp('z output:');
+    %     disp(z_next.')
+    %     break
+    % end
 
     z = z_next;  % Update the state for the next iteration
-
-    
 
     % record
     Z_log(:, s_idx) = z;   % 7×N
     U_log(:, s_idx) = u;   % 3×N
 
-    % transfer to global coordinate
-    ref_k.s     = ref.s(s_idx);
-    ref_k.rho   = ref.rho;      % scalar
-    ref_k.phi_r = ref.phi_r(s_idx);
-    [p, phi] = errorStateToWorld(z, ref_k);
-
-    X_log(s_idx)   = p(1);
-    Y_log(s_idx)   = p(2);
-    % phi_log(s_idx) = phi;
+    % Update robot state
+    robot = robot_state_update(robot, z, ref, s_idx);
+    X_log(s_idx) = robot.x_cur;
+    Y_log(s_idx) = robot.y_cur;
 
     % --- Progress ---
     percent = floor(s_idx / N * 100);
@@ -229,6 +228,15 @@ y_ref = ref.rho * sin(theta_ref);
 
 plot(x_ref, y_ref, 'w--', 'LineWidth', 1.5); hold on;
 plot(X_log, Y_log, 'b--', 'LineWidth', 1.8);
+
+% start point
+plot(X_log(1), Y_log(1), 'go', 'MarkerSize', 10, 'MarkerFaceColor', 'g');
+text(X(1), Y(1), '  Start', 'Color', 'g', 'FontSize', 12);
+
+% end point
+plot(X_log(end), Y_log(end), 'ro', 'MarkerSize', 10, 'MarkerFaceColor', 'r');
+text(X(end), Y(end), '  End', 'Color', 'r', 'FontSize', 12);
+
 axis equal;
 xlabel('X [m]');
 ylabel('Y [m]');
