@@ -8,7 +8,6 @@
 ![reference path & robot traj](img/path&traj.png)
 
 ## To-do
-- Merge robot state update with errorStateToWorld and robot struct.
 - Add final state in cost function.
 - Add disturbance. (e.g. friction)
 - Obstacle avoidance.
