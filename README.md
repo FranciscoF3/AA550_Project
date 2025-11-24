@@ -12,6 +12,7 @@
 - Add disturbance. (e.g. friction)
 - Obstacle avoidance.
 - Animation. (optional)
+- Acceleration.
 
 ## Problem note
 - How to include physical params?
