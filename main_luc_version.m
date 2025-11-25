@@ -28,6 +28,7 @@ U_log = zeros(mpc.u_dim, N);
 t_log = zeros(1, N);
 X_log = zeros(1, N);
 Y_log = zeros(1, N);
+D_log = zeros(3, N);    % disturbance log (3×N), like your groupmate
 
 % Reference state z_r, u_r (for linearization and velocity reference)
 z_r = [0;
@@ -49,6 +50,10 @@ control_period = mpc.Ts;   % = 0.1s
 
 last_percent = 0;
 
+% ---------------- Disturbance initialization ----------------
+d     = zeros(3,1);   % 3×1 disturbance: e.g. [d_vx; d_vy; d_w] or similar
+cfg_d = [];           % configuration struct if needed inside disturbance_step
+
 % =========================================================================
 % Start simulation
 % =========================================================================
@@ -58,6 +63,7 @@ for s_idx = 1:N
     v_s   = z(3) * cos(z(2)) - z(4) * sin(z(2));
     rho   = ref.rho;
     den   = rho - z(1);
+
     % simple protection against division by zero
     if abs(den) < 1e-3
         den = sign(den + 1e-3)*1e-3;
@@ -66,6 +72,7 @@ for s_idx = 1:N
     if abs(s_dot) < 1e-4
         s_dot = sign(s_dot + 1e-4)*1e-4;
     end
+
     dt_ds = 1 / s_dot;
     dt    = dt_ds * ds;
 
@@ -77,16 +84,22 @@ for s_idx = 1:N
         % store previous input for Δu term
         mpc.u_prev = u;
 
-        % Quadprog-based MPC
+        % Quadprog-based MPC (unchanged signature)
         u = New_MPC_solver_QP(z, z_r, Ad, Bd, Cd, mpc);
 
         t_last_u = t;
     end
 
-    % Update nonlinear model from control input
-    z_next = nonlinear_step(z, u, ds, ref);
+    % ------ Disturbance update & logging ------
+    d = disturbance_step(d, dt, cfg_d);   % 3×1 disturbance at this step
+    D_log(:, s_idx) = d;
 
-    z = z_next;  % Update the state for the next iteration
+    % ------ Nonlinear propagation with disturbance ------
+    % You must have nonlinear_step defined as: nonlinear_step(z,u,ds,ref,d)
+    z_next = nonlinear_step(z, u, ds, ref, d);
+
+    % Update the state for the next iteration
+    z = z_next;
 
     % record
     Z_log(:, s_idx) = z;   % 7×N
@@ -212,4 +225,15 @@ xlabel('X [m]');
 ylabel('Y [m]');
 legend('Reference circle', 'Robot trajectory');
 title('Path tracking in world frame');
+grid on;
+
+% =========================================================================
+%  Plot 6: Disturbance vs time
+% =========================================================================
+figure;
+plot(t_log, D_log', 'LineWidth', 1.2);
+xlabel('Time [s]');
+ylabel('d');
+legend('d_1','d_2','d_3');
+title('Disturbance signals vs time');
 grid on;
