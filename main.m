@@ -44,6 +44,17 @@ u_r = zeros(3,1);
 % Linearize & discretize once (constant prediction model)
 [Ad, Bd, Cd] = linearize_discretize(z_r, u_r, ds, ref);
 
+% Terminal-state LQR weight
+Q_lqr = diag([50 20 5 10 2 0.1 0.1]);
+R_lqr = diag([0.01 0.01 0.10]);
+
+[K_lqr, P_lqr, ~] = dlqr(Ad, Bd, Q_lqr, R_lqr);
+
+%Using LQR to calculate W6
+
+mpc.W6_ey   = P_lqr(1,1);
+mpc.W6_ephi = P_lqr(2,2);
+
 t = 0;
 t_last_u = 0;
 control_period = mpc.Ts;   % = 0.1s
