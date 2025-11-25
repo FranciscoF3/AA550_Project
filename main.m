@@ -71,11 +71,13 @@ control_period = mpc.Ts;   % = 0.1s
 
 last_percent = 0;
 
-% Disturbance
-d = zeros(3,1);       % 初始 disturbance
-cfg_d = [];           % 或 cfg_d = struct(...)，如果你要自訂參數
+% ---------------- Disturbance initialization ----------------
+d     = zeros(3,1);       % disturbance
+cfg_d = [];           % 或 cfg_d = struct(...)，
 
+% =========================================================================
 % Start simulation
+% =========================================================================
 for s_idx = 1: N
     
     % ====== debug: nonlinear model input ======
@@ -89,24 +91,51 @@ for s_idx = 1: N
     v_s   = z(3) * cos(z(2)) - z(4) * sin(z(2));  
     rho   = ref.rho;
     den   = rho - z(1);
-    s_dot = rho * v_s / den;
 
-    eps_s = 1e-6;
+    % simple protection against division by zero
+    if abs(den) < 1e-3
+        den = sign(den + 1e-3)*1e-3;
+    end
+    s_dot = rho * v_s / den;
+    
+    % simple protection against division by zero
+    eps_s = 1e-4;
     if abs(s_dot) < eps_s
         s_dot = sign(s_dot + eps_s) * eps_s;
     end
-
     dt_ds = 1 / s_dot;
     dt    = dt_ds * ds;
 
     t = t + dt;      % accumulate time
     t_log(s_idx) = t;
-
+    
+    % ------ MPC update at control_period ------
     if (t - t_last_u >= control_period)
+        % calculate obstacle avoidance contraints linearization params
+        dx = robot.x_cur - mpc.obs.cx;
+        dy = robot.y_cur - mpc.obs.cy;
+        dist = sqrt(dx^2 + dy^2);
+
+        % store previous input for Δu term
+        mpc.u_prev = u;
+
+        % avoid division by zero
+        if dist < 1e-6
+            nx = 1; ny = 0;
+        else
+            nx = dx / dist;
+            ny = dy / dist;
+        end
+        
+        mpc.obs.nx = dx / dist;
+        mpc.obs.ny = dy / dist;
         
         tic;
-        % MPC
-        u = mpc_solver(z, z_r, Ad, Bd, Cd, mpc, ref);
+        % % MPC
+        % u = mpc_solver(z, z_r, Ad, Bd, Cd, mpc, ref);
+
+        % Quadprog-based MPC (unchanged signature)
+        u = New_MPC_solver_QP(z, z_r, Ad, Bd, Cd, mpc, ref);
         t_solve = toc;
 
         t_last_u = t;
@@ -247,7 +276,7 @@ title('All states (debug view)');
 legend('e_y','e_\phi','v_x','v_y','\omega','a_x','a_y');
 grid on;
 
-%% =========================================================================
+%% ========================================================================
 %  Plot 5: global frame
 % =========================================================================
 
@@ -257,38 +286,46 @@ theta_ref = ref.phi_r - pi/2;        % for each sample
 x_ref = ref.rho * cos(theta_ref);
 y_ref = ref.rho * sin(theta_ref);
 
-plot(x_ref, y_ref, 'w--', 'LineWidth', 1.5); hold on;
+plot(x_ref, y_ref, 'k--', 'LineWidth', 1.5); hold on;
 plot(X_log, Y_log, 'b--', 'LineWidth', 1.8);
 
-% start point
-plot(X_log(1), Y_log(1), 'go', 'MarkerSize', 10, 'MarkerFaceColor', 'g');
-text(X_log(1), Y_log(1), '  Start', 'Color', 'g', 'FontSize', 12);
+% plot obstacle
+cx = mpc.obs.cx;
+cy = mpc.obs.cy;
+R  = mpc.obs.R_safe;
 
-% end point
-plot(X_log(end), Y_log(end), 'rx', 'MarkerSize', 10, 'MarkerFaceColor', 'r');
-text(X_log(end), Y_log(end), '  End', 'Color', 'r', 'FontSize', 12);
+% plot obstacle center（with x）
+plot(cx, cy, 'rx', 'LineWidth', 2, 'MarkerSize', 10);
 
-% % plot obstacle
-% % 取 obstacle 參數
-% cx = mpc.obs.cx;
-% cy = mpc.obs.cy;
-% R  = mpc.obs.R_safe;
-% 
-% % 畫 obstacle center（用 x 標記）
-% plot(cx, cy, 'rx', 'LineWidth', 2, 'MarkerSize', 10);
-% 
-% % 畫安全範圍圓
-% theta = linspace(0, 2*pi, 200);
-% x_circle = cx + R * cos(theta);
-% y_circle = cy + R * sin(theta);
-% plot(x_circle, y_circle, 'r-', 'LineWidth', 1.5);
-% 
-% % optional: 填滿淡紅色區域（更顯眼）
-% patch(x_circle, y_circle, 'r', ...
-%       'FaceAlpha', 0.1, ...   % 透明度
-%       'EdgeColor', 'none');
+% draw obstacle area
+theta = linspace(0, 2*pi, 200);
+x_circle = cx + R * cos(theta);
+y_circle = cy + R * sin(theta);
+plot(x_circle, y_circle, 'r-', 'LineWidth', 1.5);
 
-legend('Reference path', 'Robot path', 'Obstacle center', 'Safe region');
+% optional: 填滿淡紅色區域（更顯眼）
+patch(x_circle, y_circle, 'r', ...
+      'FaceAlpha', 0.1, ...   % 透明度
+      'EdgeColor', 'none');
+
+% start / end
+plot(X_log(1),   Y_log(1),   'go', 'MarkerSize', 10, 'MarkerFaceColor', 'g');
+plot(X_log(end), Y_log(end), 'ms', 'MarkerSize', 10, 'MarkerFaceColor', 'm');
+
+legend('Reference path', 'Robot path', ...
+       'Obstacle center', 'Safe region', ...
+       'Start', 'End');
+% 
+% % start point
+% plot(X_log(1), Y_log(1), 'go', 'MarkerSize', 10, 'MarkerFaceColor', 'g');
+% text(X_log(1), Y_log(1), '  Start', 'Color', 'g', 'FontSize', 12);
+% 
+% % end point
+% plot(X_log(end), Y_log(end), 'rx', 'MarkerSize', 10, 'MarkerFaceColor', 'r');
+% text(X_log(end), Y_log(end), '  End', 'Color', 'r', 'FontSize', 12);
+
+
+% legend('Reference path', 'Robot path', 'Obstacle center', 'Safe region');
 xlabel('x [m]');
 ylabel('y [m]');
 title('Path tracking with obstacle and safe region');

@@ -59,7 +59,7 @@ function [robot, mpc, sim] = init_params()
     mpc.u_dim = 3;      % control input dimension
     
     % Moving corrider
-    mpc.sigma_dim = 5; % moving corrider params
+    mpc.sigma_dim = 6; % moving corrider params 5
 
     % MPC sampling & horizon
     mpc.Ts = 0.1;   % control period[s]
@@ -67,10 +67,11 @@ function [robot, mpc, sim] = init_params()
     mpc.Ch = 5;     % control horizon (<= Np) 10
 
     % Cost weights 
-    mpc.W1 = 150;  % weight for lateral error ey
+    mpc.W1 = 280;  % weight for lateral error ey
     mpc.W2 = 80;   % weight for heading error epsi
     mpc.W3 = diag([80 40 10]);
-    mpc.W4 = eye(mpc.sigma_dim)*200;
+    mpc.W4_corridor = eye(mpc.sigma_dim-1)*100;
+    mpc.W4_obs = 5;
     mpc.W5 = 1;
     mpc.W6 = 1;
 
@@ -104,13 +105,17 @@ function [robot, mpc, sim] = init_params()
     mpc.use_obstacle = true;
     
     % Single circular obstacle
-    mpc.obs.cx = 2.0;      % obstacle center x [m]
+    mpc.obs.cx = -4.8;     % obstacle center x [m]
     mpc.obs.cy = 1.0;      % obstacle center y [m]
-    mpc.obs.R_safe = 0.8;  % safety radius: distance from robot center to obstacle center >= R_safe
+    mpc.obs.R_safe = 0.3;  % safety radius: distance from robot center to obstacle center >= R_safe
     
-    % Avoiding cost 
-    mpc.obs.W = 5.0;       % 
-    mpc.obs.eps = 0.1;     % 
+    % % Avoiding cost 
+    % mpc.obs.W = 5.0;       % 
+    % mpc.obs.eps = 0.1;     % 
+    
+    % Linearization params
+    mpc.obs.nx = 0;
+    mpc.obs.ny = 0;
 
     % ---------------------------------------------------------------------
     % Simulation parameters
