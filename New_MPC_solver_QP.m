@@ -131,8 +131,8 @@ function u = New_MPC_solver_QP(z0, zr, Ad, Bd, Cd, mpc)
     % 3) Terminal cost: W6 * (ey_T^2 + ephi_T^2) at z_{Kh+1}
     izT = idxZ(Kh+1);
     Q_T = zeros(n);
-    Q_T(1,1) = W6;
-    Q_T(2,2) = W6;
+    Q_T(1,1) = mpc.W6_ey;
+    Q_T(2,2) = mpc.W6_ephi;
     H(izT,izT) = H(izT,izT) + 2*Q_T;
 
     % ---------- Equality constraints Aeq x = beq ----------
