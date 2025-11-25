@@ -64,12 +64,12 @@ function [robot, mpc, sim] = init_params()
     % MPC sampling & horizon
     mpc.Ts = 0.1;   % control period[s]
     mpc.Kh = 15;    % prediction horizon 60
-    mpc.Ch = 5;    % control horizon (<= Np) 10
+    mpc.Ch = 5;     % control horizon (<= Np) 10
 
     % Cost weights 
-    mpc.W1 = 150;   % weight for lateral error ey
+    mpc.W1 = 150;  % weight for lateral error ey
     mpc.W2 = 80;   % weight for heading error epsi
-    mpc.W3 = diag([50 20 10]);
+    mpc.W3 = diag([80 40 10]);
     mpc.W4 = eye(mpc.sigma_dim)*200;
     mpc.W5 = 1;
     mpc.W6 = 1;
@@ -85,7 +85,7 @@ function [robot, mpc, sim] = init_params()
 
     % State constraints
     mpc.z_min = [-0.5;      % e_y
-                 -0.35;      % e_phi
+                 -0.35;     % e_phi
                   0.1;      % v_x
                  -0.5;      % v_y
                  -1.5;      % w
@@ -93,17 +93,29 @@ function [robot, mpc, sim] = init_params()
                  -0.4];     % a_y
 
     mpc.z_max = [ 0.5;      % e_y
-                  0.35;      % e_phi
+                  0.35;     % e_phi
                   1.2;      % v_x
                   0.5;      % v_y
                   145;      % w??
                   0.4;      % a_x
                   0.4];     % a_y
+
+    % ----- Obstacle settings -----
+    mpc.use_obstacle = true;
     
+    % Single circular obstacle
+    mpc.obs.cx = 2.0;      % obstacle center x [m]
+    mpc.obs.cy = 1.0;      % obstacle center y [m]
+    mpc.obs.R_safe = 0.8;  % safety radius: distance from robot center to obstacle center >= R_safe
+    
+    % Avoiding cost 
+    mpc.obs.W = 5.0;       % 
+    mpc.obs.eps = 0.1;     % 
+
     % ---------------------------------------------------------------------
     % Simulation parameters
     sim.ds    = 0.1;     % s-domain scale resolution (meter)
-    sim.v_ref = 0.5;      % reference speed along s
-    sim.n_lap = 1;        % number of laps
+    sim.v_ref = 0.7;      % reference speed along s
+    sim.n_lap = 1.1;        % number of laps
     sim.rho   = 5.0;      % radius [meter] 5 m
 end

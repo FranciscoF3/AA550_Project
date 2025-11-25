@@ -1,4 +1,4 @@
-function u = mpc_solver(z, zr, Ad, Bd, Cd, mpc)
+function u = mpc_solver(z, zr, Ad, Bd, Cd, mpc, ref_seq)
 %   MPC solver (CVX) for linearized space-based model
 %
 %   z_{k+1} = Ad z_k + Bd u_k + Cd
@@ -33,9 +33,17 @@ function u = mpc_solver(z, zr, Ad, Bd, Cd, mpc)
     W2 = mpc.W2;
     W3 = mpc.W3;
     W4 = mpc.W4;
-    W5 = mpc.W5;
-    W6 = mpc.W6;
+    % W5 = mpc.W5;
+    % W6 = mpc.W6;
 
+    % obstacle
+    % Wo = mpc.obs.W;
+    % eps_o = mpc.obs.eps;
+    % obs_x = mpc.obs.cx;
+    % obs_y = mpc.obs.cy;
+
+    % reference velocity
+    vr = zr(3:5);
 
     % Solve finite QP
     cvx_clear; 
@@ -53,8 +61,6 @@ function u = mpc_solver(z, zr, Ad, Bd, Cd, mpc)
 
         % ------ Cost function ------
         J = 0;
-        % reference velocity
-        vr = zr(3:5);
 
         for k = 1 : Kh
             % errors
@@ -64,10 +70,26 @@ function u = mpc_solver(z, zr, Ad, Bd, Cd, mpc)
             % velocity state
             v_state = Z(3:5, k);
 
+            % obstacle avoidance cost
+            % ref_k = ref_seq;        % struct: xr, yr, phi_r
+            % xr    = ref_k.x_r(k);
+            % yr    = ref_k.y_r(k);
+            % phi_r = ref_k.phi_r(k);
+            % 
+            % x_i = xr - e_y * sin(phi_r);
+            % y_i = yr + e_y * cos(phi_r);
+            % 
+            % dx = x_i - obs_x;
+            % dy = y_i - obs_y;
+            % d2 = dx^2 + dy^2;
+
+            % Total cost
             J = J + W1 * e_y ^ 2 ...
                   + W2 * e_phi ^ 2 ...
                   + quad_form((v_state - vr), W3) ...
-                  + quad_form(Sig(:, k), W4);  
+                  + quad_form(Sig(:, k), W4);
+            % ...
+            %       + Wo / (d2 + eps_o);  
         end
 
         minimize(J)

@@ -1,4 +1,4 @@
-function z_next = nonlinear_step(z, u, delta_s, ref)
+function z_next = nonlinear_step(z, u, delta_s, ref, d)
 %/Update error state z(s) using the nonlinear space-based model.
 % 
 % Args:
@@ -23,8 +23,16 @@ function z_next = nonlinear_step(z, u, delta_s, ref)
 %                Updated error-state at the next path step s + Δs:
 %                [e_y; e_phi; v_x; a_x; v_y; a_y; w]^T
 % /% 
-    % Nonlinear continuous model
-    dz_ds = f_continuous(z, u, ref);  
+    
+    % Whether include d in inputs
+    if nargin < 5
+        % Nonlinear continuous model
+        dz_ds = f_continuous(z, u, ref);  
+
+    else
+        % Nonlinear continuous model with disturbance
+        dz_ds = f_continuous_d(z, u, ref, d); 
+    end
 
     % Update z(s)
     z_next = z + dz_ds * delta_s;   % Euler integration
