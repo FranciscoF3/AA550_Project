@@ -1,0 +1,72 @@
+clear; clc; close all;
+
+%% Load saved results
+load mpc_results.mat   % struct mpc_results
+load pid_results.mat   % struct pid_results
+
+%% Recreate reference trajectory
+[robot, mpc, sim] = init_params();
+ref = reference_trajectory(sim);
+
+theta_ref = ref.phi_r - pi/2;
+x_ref = ref.rho * cos(theta_ref);
+y_ref = ref.rho * sin(theta_ref);
+
+%% Extract logged data
+t_mpc = mpc_results.t;
+Z_mpc = mpc_results.Z;
+X_mpc = mpc_results.X;
+Y_mpc = mpc_results.Y;
+
+t_pid = pid_results.t;
+Z_pid = pid_results.Z;
+X_pid = pid_results.X;
+Y_pid = pid_results.Y;
+
+%% Match time lengths
+N_common = min(length(t_mpc), length(t_pid));
+t_mpc_c  = t_mpc(1:N_common);
+t_pid_c  = t_pid(1:N_common);
+
+ey_mpc   = Z_mpc(1,1:N_common);
+ephi_mpc = Z_mpc(2,1:N_common);
+
+ey_pid   = Z_pid(1,1:N_common);
+ephi_pid = Z_pid(2,1:N_common);
+
+%% ================================================================
+% 1) Lateral error comparison
+%% ================================================================
+figure;
+subplot(2,1,1);
+plot(t_mpc_c, ey_mpc, 'b', 'LineWidth', 1.5); hold on;
+plot(t_pid_c, ey_pid, 'r--', 'LineWidth', 1.5);
+grid on;
+xlabel('Time [s]');
+ylabel('e_y [m]');
+title('Lateral Error: MPC vs PID');
+legend('MPC','PID','Location','best');
+
+%% 2) Heading error comparison
+subplot(2,1,2);
+plot(t_mpc_c, ephi_mpc, 'b', 'LineWidth', 1.5); hold on;
+plot(t_pid_c, ephi_pid, 'r--', 'LineWidth', 1.5);
+grid on;
+xlabel('Time [s]');
+ylabel('e_\phi [rad]');
+title('Heading Error: MPC vs PID');
+legend('MPC','PID','Location','best');
+
+%% ================================================================
+% 3) World-frame path comparison (with reference)
+%% ================================================================
+figure;
+plot(x_ref, y_ref, 'k--', 'LineWidth', 1.5); hold on;
+plot(X_mpc, Y_mpc, 'b', 'LineWidth', 1.8);
+plot(X_pid, Y_pid, 'r--', 'LineWidth', 1.8);
+
+grid on; axis equal;
+xlabel('X [m]'); 
+ylabel('Y [m]');
+title('Path Tracking Comparison: MPC vs PID');
+legend('Reference Path','MPC Trajectory','PID Trajectory','Location','best');
