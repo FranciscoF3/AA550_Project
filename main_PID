@@ -1,0 +1,291 @@
+clear; clc; close all;
+
+% =========================================================================
+% Initialize params
+% =========================================================================
+[robot, mpc, sim] = init_params();
+ds = sim.ds;      % s-domain step in path coordinate
+
+% Generate reference circular path
+ref = reference_trajectory(sim);
+
+s = ref.s;      
+N = numel(s);   % number of steps
+
+% Initialize robot state on reference
+robot.x_cur   = ref.x_r(1);
+robot.y_cur   = ref.y_r(1);
+robot.phi_cur = ref.phi_r(1);
+
+% Error state z = [e_y; e_phi; v_x; v_y; w; a_x; a_y]
+z          = zeros(mpc.z_dim, 1);
+z(3)       = sim.v_ref;   % start with forward velocity near reference
+u          = zeros(3,1);  % [alpha; j_x; j_y]
+
+% Disturbance state (same dimension as your disturbance_step, 3x1)
+d      = zeros(3,1);
+cfg_d  = [];              % use default config inside disturbance_step
+
+% Logs
+Z_log = zeros(mpc.z_dim, N);
+U_log = zeros(mpc.u_dim, N);
+t_log = zeros(1, N);
+X_log = zeros(1, N);
+Y_log = zeros(1, N);
+D_log = zeros(3, N);
+
+% =========================================================================
+% PID GAINS  (starting point — you can tune these)
+% =========================================================================
+% Longitudinal speed control (v_x → j_x)
+Kp_v  =  2.0;
+Ki_v  =  0.5;
+Kd_v  =  0.0;   % often OK to start with PI only
+Kp_ax =  1.0;   % how strongly j_x reacts to (a_x_cmd - a_x)
+
+% Lateral / heading control (e_y, e_phi → alpha, j_y)
+Kp_ey    = -0.8;   % sign matters; negative means steering back to path if e_y>0
+Kd_ey    = -0.2;
+Ki_ey    =  0.0;
+
+Kp_ephi  = -2.0;
+Kd_ephi  = -0.3;
+Ki_ephi  =  0.0;
+
+% Inner loop on yaw rate w (omega_cmd → alpha)
+Kp_w  =  4.0;
+Kd_w  =  0.5;
+
+% Lateral velocity/acceleration shaping for j_y
+Kp_vy = -3.0;
+Kd_vy = -0.5;
+Kp_ay = -1.0;
+
+% Integrators & previous errors
+int_ev   = 0;
+int_ey   = 0;
+int_ephi = 0;
+
+prev_ev   = 0;
+prev_ey   = 0;
+prev_ephi = 0;
+
+t       = 0;
+last_pct = 0;
+
+% =========================================================================
+% Simulation loop
+% =========================================================================
+for k = 1:N
+
+    % --- 1. Compute dt from s_dot, exactly as in MPC main ---
+    e_y   = z(1);
+    e_phi = z(2);
+    v_x   = z(3);
+    v_y   = z(4);
+    w     = z(5);
+    a_x   = z(6);
+    a_y   = z(7);
+
+    v_s   = v_x * cos(e_phi) - v_y * sin(e_phi);   % along-path velocity
+    rho   = ref.rho;
+    den   = rho - e_y;
+
+    if abs(den) < 1e-3
+        den = sign(den + 1e-3)*1e-3;
+    end
+    s_dot = rho * v_s / den;
+
+    if abs(s_dot) < 1e-4
+        s_dot = sign(s_dot + 1e-4)*1e-4;
+    end
+
+    dt_ds = 1 / s_dot;
+    dt    = dt_ds * ds;
+
+    t = t + dt;
+    t_log(k) = t;
+
+    % =========================================================================
+    % 2. PID CONTROL LAW
+    % =========================================================================
+    % --- Longitudinal speed control (v_x ≈ sim.v_ref) ---
+    v_ref = sim.v_ref;
+    e_v   = v_ref - v_x;
+
+    int_ev  = int_ev + e_v * dt;
+    dev     = (e_v - prev_ev)/dt;
+
+    % desired acceleration in x
+    a_x_cmd = Kp_v*e_v + Ki_v*int_ev + Kd_v*dev;
+
+    % jerk command to drive a_x → a_x_cmd
+    j_x = Kp_ax * (a_x_cmd - a_x);
+
+    prev_ev = e_v;
+
+    % --- Lateral & heading outer loop: compute desired yaw rate ---
+    int_ey   = int_ey   + e_y   * dt;
+    int_ephi = int_ephi + e_phi * dt;
+
+    dey   = (e_y   - prev_ey)  / dt;
+    dephi = (e_phi - prev_ephi)/ dt;
+
+    % yaw-rate command: combine influence of e_y and e_phi
+    omega_cmd = ...
+        Kp_ey   * e_y   + Kd_ey   * dey   + Ki_ey   * int_ey + ...
+        Kp_ephi * e_phi + Kd_ephi * dephi + Ki_ephi * int_ephi;
+
+    prev_ey   = e_y;
+    prev_ephi = e_phi;
+
+    % --- Inner yaw-rate loop: w → omega_cmd, output alpha (yaw jerk) ---
+    e_w   = omega_cmd - w;
+    alpha = Kp_w * e_w - Kd_w * (w/dt);   % crude derivative damping on w
+
+    % --- Lateral velocity/acceleration shaping: j_y ---
+    % We want v_y → 0, a_y → 0, also helping reduce e_y
+    j_y = Kp_vy * v_y + Kd_vy * (v_y/dt) + Kp_ay * a_y;
+
+    % Pack control and clamp to hardware constraints
+    u = [alpha; j_x; j_y];
+
+    u = max(min(u, mpc.u_max), mpc.u_min);   % elementwise saturation
+
+    % =========================================================================
+    % 3. Disturbance & state propagation
+    % =========================================================================
+    % disturbance at this step (if you have disturbance_step.m)
+    if exist('disturbance_step.m','file')
+        d = disturbance_step(d, dt, cfg_d);
+    else
+        d = zeros(3,1);
+    end
+    D_log(:,k) = d;
+
+    % Propagate nonlinear model
+    z_next = nonlinear_step(z, u, ds, ref, d);
+
+    % Update robot pose in world frame
+    robot = robot_state_update(robot, z_next, ref, k);
+
+    % Logs
+    Z_log(:,k) = z_next;
+    U_log(:,k) = u;
+    X_log(k)   = robot.x_cur;
+    Y_log(k)   = robot.y_cur;
+
+    z = z_next;
+
+    % Progress print
+    pct = floor(k/N*100);
+    if pct ~= last_pct
+        fprintf('\b\b\b%2d%%', pct);
+        last_pct = pct;
+    end
+end
+
+fprintf('\nPID simulation finished.\n');
+
+% =========================================================================
+% Visualization
+% =========================================================================
+%  Plot 1: lateral & heading error
+% =========================================================================
+figure;
+subplot(2,1,1);
+plot(t_log, Z_log(1,:), 'LineWidth', 1.5);
+xlabel('Time [s]'); ylabel('e_y [m]');
+title('PID: Lateral error e_y(t)'); grid on;
+
+subplot(2,1,2);
+plot(t_log, Z_log(2,:), 'LineWidth', 1.5);
+xlabel('Time [s]'); ylabel('e_\phi [rad]');
+title('PID: Heading error e_\phi(t)'); grid on;
+
+% =========================================================================
+%  Plot 2: velocity states v_x, v_y, w
+% =========================================================================
+
+figure;
+subplot(3,1,1);
+plot(t_log, Z_log(3,:), 'LineWidth', 1.5); hold on;
+yline(sim.v_ref, '--');
+xlabel('Time [s]'); ylabel('v_x [m/s]');
+title('PID: Longitudinal velocity v_x(t)');
+legend('v_x','v_x^{ref}'); grid on;
+
+subplot(3,1,2);
+plot(t_log, Z_log(4,:), 'LineWidth', 1.5);
+xlabel('Time [s]'); ylabel('v_y [m/s]');
+title('PID: Lateral velocity v_y(t)'); grid on;
+
+subplot(3,1,3);
+plot(t_log, Z_log(5,:), 'LineWidth', 1.5);
+xlabel('Time [s]'); ylabel('\omega [rad/s]');
+title('PID: Yaw rate \omega(t)'); grid on;
+
+% =========================================================================
+%  Plot 3: control inputs
+% =========================================================================
+
+figure;
+subplot(3,1,1);
+plot(t_log, U_log(1,:), 'LineWidth', 1.5);
+xlabel('Time [s]'); ylabel('\alpha [rad/s^3]');
+title('PID: Yaw jerk \alpha(t)'); grid on;
+
+subplot(3,1,2);
+plot(t_log, U_log(2,:), 'LineWidth', 1.5);
+xlabel('Time [s]'); ylabel('j_x [m/s^3]');
+title('PID: Longitudinal jerk j_x(t)'); grid on;
+
+subplot(3,1,3);
+plot(t_log, U_log(3,:), 'LineWidth', 1.5);
+xlabel('Time [s]'); ylabel('j_y [m/s^3]');
+title('PID: Lateral jerk j_y(t)'); grid on;
+
+% =========================================================================
+%  Plot 4: all states 
+% =========================================================================
+
+figure;
+plot(t_log, Z_log', 'LineWidth', 1.0);
+xlabel('t [s]'); ylabel('state value');
+title('PID: All states (debug view)');
+legend('e_y','e_\phi','v_x','v_y','\omega','a_x','a_y');
+grid on;
+
+% =========================================================================
+%  Plot 5: global frame path
+% =========================================================================
+
+figure;
+theta_ref = ref.phi_r - pi/2;
+x_ref     = ref.rho * cos(theta_ref);
+y_ref     = ref.rho * sin(theta_ref);
+
+plot(x_ref, y_ref, 'k--', 'LineWidth', 1.5); hold on;
+plot(X_log, Y_log, 'b-', 'LineWidth', 1.8);
+
+plot(X_log(1),   Y_log(1),   'go', 'MarkerSize', 10, 'MarkerFaceColor', 'g');
+text(X_log(1),   Y_log(1),   '  Start', 'Color', 'g', 'FontSize', 12);
+plot(X_log(end), Y_log(end), 'ro', 'MarkerSize', 10, 'MarkerFaceColor', 'r');
+text(X_log(end), Y_log(end), '  End', 'Color', 'r', 'FontSize', 12);
+
+axis equal; grid on;
+xlabel('X [m]'); ylabel('Y [m]');
+legend('Reference circle', 'PID trajectory');
+title('PID: Path tracking in world frame');
+
+% =========================================================================
+%  Plot 6: Disturbance vs time
+% =========================================================================
+
+if any(D_log(:) ~= 0)
+    figure;
+    plot(t_log, D_log', 'LineWidth', 1.2);
+    xlabel('Time [s]'); ylabel('d');
+    legend('d_1','d_2','d_3');
+    title('Disturbance signals vs time'); grid on;
+end
