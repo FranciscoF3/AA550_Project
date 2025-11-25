@@ -1,84 +1,103 @@
-function u = New_MPC_solver_QP(z0, z_r, Ad, Bd, Cd, mpc)
-% MPC_SOLVER  Quadprog-based MPC for space-based linearized model
+function u = New_MPC_solver_QP(z0, zr, Ad, Bd, Cd, mpc)
+% New_MPC_solver_QP
+%   Quadprog-based MPC for space-based linearized model:
 %
-%   z_{k+1} = Ad z_k + Bd u_k + Cd
+%       z_{k+1} = Ad z_k + Bd u_k + Cd
 %
-%   States: z = [e_y; e_phi; v_x; v_y; w; a_x; a_y]
+%   States: z = [e_y; e_\phi; v_x; v_y; w; a_x; a_y]
 %   Inputs: u = [alpha; j_x; j_y]
 %
-%   Cost (per stage k = 1..Kh):
-%       W1*e_y(k)^2 + W2*e_phi(k)^2
+%   Cost per stage k = 1..Kh:
+%       W1*e_y(k)^2 + W2*e_\phi(k)^2
 %     + (v(k)-v_ref)' W3 (v(k)-v_ref)
-%     + Sig(:,k)' W4 Sig(:,k)
+%     + sigma_k' W4 sigma_k
 %     + W5 * ||u_k - u_{k-1}||^2
-%   plus terminal cost W6 * (e_y(Kh+1)^2 + e_phi(Kh+1)^2).
 %
-%   Slacks Sig soften corridor on z(1:5).
+%   Terminal cost:
+%       W6 * (e_y(Kh+1)^2 + e_\phi(Kh+1)^2)
+%
+%   Slacks sigma_k soften corridor constraints on z(1:5).
+%
+%   INPUTS:
+%       z0  : current state (7x1)
+%       zr  : reference state for linearization (7x1)
+%       Ad,Bd,Cd : discrete linear model (Kh fixed)
+%       mpc : struct with fields:
+%             Kh, Ch, z_dim, u_dim, sigma_dim
+%             W1..W6, u_min/u_max, z_min/z_max
+%             (optional) u_prev (3x1)
+%
+%   OUTPUT:
+%       u   : optimal control input at current step (3x1)
 
-    % ---------- Unpack MPC parameters ----------
-    Kh   = mpc.Kh;
-    Ch   = mpc.Ch;
+    % ---------- MPC parameters ----------
+    Kh   = mpc.Kh;         % prediction horizon
+    Ch   = mpc.Ch;         % control horizon
 
-    n    = mpc.z_dim;      % 7
-    m    = mpc.u_dim;      % 3
-    sdim = mpc.sigma_dim;  % usually 5
+    n    = mpc.z_dim;      % state dimension (7)
+    m    = mpc.u_dim;      % input dimension (3)
+    sdim = mpc.sigma_dim;  % number of slacks per stage (usually 5)
 
+    % Constraints
     u_min = mpc.u_min;
     u_max = mpc.u_max;
     z_min = mpc.z_min;
     z_max = mpc.z_max;
 
+    % Weights
     W1 = mpc.W1;   % ey
     W2 = mpc.W2;   % ephi
     W3 = mpc.W3;   % 3x3 on [vx; vy; w]
-    W4 = mpc.W4;   % scalar or sdim×sdim
+    W4 = mpc.W4;   % slack weight (scalar or sdim×sdim)
     W5 = mpc.W5;   % Δu penalty
     W6 = mpc.W6;   % terminal ey,ephi
 
-    % previous input for Δu (if provided)
+    % Previous input for Δu term
     if isfield(mpc, 'u_prev')
         u_prev = mpc.u_prev;
     else
         u_prev = zeros(m,1);
     end
 
-    % reference velocity from reference state z_r
-    v_ref = z_r(3:5);   % [v_x_ref; v_y_ref; w_ref]
+    % Reference velocity from zr
+    v_ref = zr(3:5);      % [v_x_ref; v_y_ref; w_ref]
 
     % ---------- Decision variable x = [Z_stack; U_stack; Sig_stack] ----------
-    %   Z_stack = [z_1; ...; z_{Kh+1}]      (n*(Kh+1) x 1)
-    %   U_stack = [u_1; ...; u_{Kh}]        (m*Kh x 1)
-    %   Sig_stack = [sigma_1; ...;sigma_Kh] (sdim*Kh x 1)
+    %   Z_stack = [z_1; ...; z_{Kh+1}]        (n*(Kh+1) x 1)
+    %   U_stack = [u_1; ...; u_{Kh}]          (m*Kh x 1)
+    %   Sig_stack = [sigma_1; ...; sigma_Kh]  (sdim*Kh x 1)
     NZ = n * (Kh+1);
     NU = m * Kh;
     NS = sdim * Kh;
     Nx = NZ + NU + NS;
 
     % index helpers into x
-    idxZ = @(k) (k-1)*n + (1:n);                        % z_k
-    idxU = @(k) NZ + (k-1)*m + (1:m);                   % u_k
-    idxS = @(k) NZ + NU + (k-1)*sdim + (1:sdim);        % sigma_k
+    idxZ = @(k) (k-1)*n + (1:n);                 % indices for z_k
+    idxU = @(k) NZ + (k-1)*m + (1:m);            % indices for u_k
+    idxS = @(k) NZ + NU + (k-1)*sdim + (1:sdim); % indices for sigma_k
 
     % ---------- Build cost: 0.5 x'Hx + f'x ----------
     H = zeros(Nx, Nx);
     f = zeros(Nx, 1);
 
-    % State weighting matrix for stage cost
+    % State tracking weight Q
     Q = zeros(n);
-    Q(1,1)     = W1;          % ey
-    Q(2,2)     = W2;          % ephi
-    Q(3:5,3:5) = W3;          % vx, vy, w
+    Q(1,1)     = W1;       % ey
+    Q(2,2)     = W2;       % ephi
+    Q(3:5,3:5) = W3;       % [vx, vy, w]
 
-    z_ref = zeros(n,1);
-    z_ref(3:5) = v_ref;
-    Qzref = Q * z_ref;
+    % reference full-state vector used in (z_k - z_ref)
+    z_ref       = zeros(n,1);
+    z_ref(3:5)  = v_ref;
+    Qzref       = Q * z_ref;
 
-    % 1) Stage state + slack costs
+    % 1) Stage costs: state tracking + slack
     for k = 1:Kh
         iz = idxZ(k);
         is = idxS(k);
 
         % (z_k - z_ref)' Q (z_k - z_ref)
+        % expands to z_k'Qz_k - 2 z_ref'Q z_k + const
         H(iz,iz) = H(iz,iz) + 2*Q;
         f(iz)    = f(iz)    - 2*Qzref;
 
@@ -109,7 +128,7 @@ function u = New_MPC_solver_QP(z0, z_r, Ad, Bd, Cd, mpc)
         end
     end
 
-    % 3) Terminal cost at z_{Kh+1}
+    % 3) Terminal cost: W6 * (ey_T^2 + ephi_T^2) at z_{Kh+1}
     izT = idxZ(Kh+1);
     Q_T = zeros(n);
     Q_T(1,1) = W6;
@@ -119,15 +138,14 @@ function u = New_MPC_solver_QP(z0, z_r, Ad, Bd, Cd, mpc)
     % ---------- Equality constraints Aeq x = beq ----------
     % 1) z_1 = z0
     % 2) z_{k+1} = Ad z_k + Bd u_k + Cd
-    % 3) control horizon: for k > Ch, U_k = U_Ch
+    % 3) control horizon: for k > Ch, u_k = u_Ch
 
-    % base equalities: initial + dynamics
     nEq_base = n*(Kh+1);
     Aeq = zeros(nEq_base, Nx);
     beq = zeros(nEq_base, 1);
     row = 0;
 
-    % 1) initial condition: Z(:,1) == z0
+    % 1) Initial condition: z_1 = z0
     iz1 = idxZ(1);
     for i = 1:n
         row = row+1;
@@ -135,23 +153,23 @@ function u = New_MPC_solver_QP(z0, z_r, Ad, Bd, Cd, mpc)
         beq(row)         = z0(i);
     end
 
-    % 2) dynamics: Z(:,k+1) == Ad*Z(:,k) + Bd*U(:,k) + Cd
+    % 2) Dynamics: z_{k+1} = Ad z_k + Bd u_k + Cd
     for k = 1:Kh
         izk  = idxZ(k);
         izk1 = idxZ(k+1);
-        iuk  = idxU(k);
+        iu   = idxU(k);
 
         for i = 1:n
             row = row+1;
             % z_{k+1}(i) - Ad(i,:)*z_k - Bd(i,:)*u_k = Cd(i)
             Aeq(row, izk1(i)) = 1;
             Aeq(row, izk)     = Aeq(row, izk) - Ad(i,:);
-            Aeq(row, iuk)     = Aeq(row, iuk) - Bd(i,:);
+            Aeq(row, iu)      = Aeq(row, iu)  - Bd(i,:);
             beq(row)          = Cd(i);
         end
     end
 
-    % 3) Control horizon equalities: for k > Ch, U_k = U_Ch
+    % 3) Control horizon: for k > Ch, u_k = u_Ch
     Aeq_ch = [];
     beq_ch = [];
     if Ch < Kh
@@ -175,7 +193,7 @@ function u = New_MPC_solver_QP(z0, z_r, Ad, Bd, Cd, mpc)
 
     % ---------- Inequality constraints Aineq x <= bineq ----------
     % 1) Input bounds u_min <= u_k <= u_max
-    % 2) Soft corridor for z(1:5) with slacks Sig(:,k)
+    % 2) Soft corridor for z(1:5) using slacks sigma
     % 3) Hard bounds on z(6:7)
     % 4) Slack >= 0
 
@@ -199,22 +217,22 @@ function u = New_MPC_solver_QP(z0, z_r, Ad, Bd, Cd, mpc)
         end
     end
 
-    % 2) Corridor with slacks for z(1:5), 3) hard bounds for z(6:7)
+    % 2) Corridor with slacks on z(1:5), 3) hard bounds on z(6:7)
     for k = 1:Kh
         iz = idxZ(k);
         is = idxS(k);
 
-        % softened z(1:5)
+        % softened constraints for z(1:5)
         for i = 1:5
             is_i = is(i);
 
-            % lower: z_i >= z_min(i) - s_i -> -z_i - s_i <= -z_min(i)
+            % lower: z_i >= z_min(i) - s_i  ->  -z_i - s_i <= -z_min(i)
             rI = rI+1;
             Aineq(rI, iz(i)) = -1;
             Aineq(rI, is_i)  = -1;
             bineq(rI)        = -z_min(i);
 
-            % upper: z_i <= z_max(i) + s_i -> z_i - s_i <= z_max(i)
+            % upper: z_i <= z_max(i) + s_i  ->   z_i - s_i <= z_max(i)
             rI = rI+1;
             Aineq(rI, iz(i)) =  1;
             Aineq(rI, is_i)  = -1;
@@ -249,7 +267,7 @@ function u = New_MPC_solver_QP(z0, z_r, Ad, Bd, Cd, mpc)
     bineq = bineq(1:rI);
 
     % ---------- Solve QP ----------
-    H = (H + H')/2;  % ensure symmetry
+    H = (H + H')/2;  % enforce symmetry
 
     opts = optimoptions('quadprog', ...
         'Display', 'off', ...
@@ -257,11 +275,12 @@ function u = New_MPC_solver_QP(z0, z_r, Ad, Bd, Cd, mpc)
 
     [x_opt, ~, exitflag] = quadprog(H, f, Aineq, bineq, Aeq, beq, [], [], [], opts);
 
+    % Fallback if solver fails
     if exitflag <= 0 || isempty(x_opt) || any(~isfinite(x_opt))
-        warning('mpc_solver (quadprog): solver failed, using previous input.');
+        warning('New_MPC_solver_QP: quadprog failed, using previous input.');
         u = u_prev;
     else
-        % extract u_1
+        % extract u_1 from U_stack
         U_stack = x_opt(NZ+1 : NZ+NU);
         u = U_stack(1:m);
     end
