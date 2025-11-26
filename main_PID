@@ -50,28 +50,28 @@ D_log = zeros(3, N);
 % PID GAINS  (starting point — you can tune these)
 % =========================================================================
 % Longitudinal speed control (v_x → j_x)
-Kp_v  =  2.0;
-Ki_v  =  0.5;
-Kd_v  =  0.0;   % often OK to start with PI only
-Kp_ax =  1.0;   % how strongly j_x reacts to (a_x_cmd - a_x)
+Kp_v  =  1.5;
+Ki_v  =  0.35;
+Kd_v  =  0.05;   % often OK to start with PI only
+Kp_ax =  1.2;   % how strongly j_x reacts to (a_x_cmd - a_x)
 
 % Lateral / heading control (e_y, e_phi → alpha, j_y)
-Kp_ey    = -0.8;   % sign matters; negative means steering back to path if e_y>0
-Kd_ey    = -0.2;
-Ki_ey    =  0.0;
+Kp_ey    = -1.0;   % sign matters; negative means steering back to path if e_y>0
+Kd_ey    = -0.3;
+Ki_ey    =  -0.05;
 
-Kp_ephi  = -2.0;
-Kd_ephi  = -0.3;
-Ki_ephi  =  0.0;
+Kp_ephi  = -2.5;
+Kd_ephi  = -0.45;
+Ki_ephi  =  -0.02;
 
 % Inner loop on yaw rate w (omega_cmd → alpha)
-Kp_w  =  4.0;
-Kd_w  =  0.5;
+Kp_w  =  2.5;
+Kd_w  =  0.4;
 
 % Lateral velocity/acceleration shaping for j_y
-Kp_vy = -3.0;
-Kd_vy = -0.5;
-Kp_ay = -1.0;
+Kp_vy = -2.0;
+Kd_vy = -0.3;
+Kp_ay = -0.7;
 
 % Integrators & previous errors
 int_ev   = 0;
