@@ -22,9 +22,21 @@ z          = zeros(mpc.z_dim, 1);
 z(3)       = sim.v_ref;   % start with forward velocity near reference
 u          = zeros(3,1);  % [alpha; j_x; j_y]
 
-% Disturbance state (same dimension as your disturbance_step, 3x1)
+% Disturbance state 
 d      = zeros(3,1);
 cfg_d  = [];              % use default config inside disturbance_step
+
+% ---------- Pre-generate a shared disturbance profile ----------
+rng(0);                      % same seed as MPC for identical disturbances
+dt_nom     = ds / sim.v_ref; % nominal dt for profile generation
+d_gen      = zeros(3,1);     % internal generator variable
+D_profile  = zeros(3, N);    % allocate profile (3 × N)
+
+for k = 1:N
+    d_gen = disturbance_step(d_gen, dt_nom, cfg_d);
+    D_profile(:,k) = d_gen;
+end
+
 
 % Logs
 Z_log = zeros(mpc.z_dim, N);
@@ -155,16 +167,13 @@ for k = 1:N
     % =========================================================================
     % 3. Disturbance & state propagation
     % =========================================================================
-    % disturbance at this step (if you have disturbance_step.m)
-    if exist('disturbance_step.m','file')
-        d = disturbance_step(d, dt, cfg_d);
-    else
-        d = zeros(3,1);
-    end
+   
+    d = D_profile(:, k);
     D_log(:,k) = d;
 
     % Propagate nonlinear model
     z_next = nonlinear_step(z, u, ds, ref, d);
+
 
     % Update robot pose in world frame
     robot = robot_state_update(robot, z_next, ref, k);
@@ -289,3 +298,11 @@ if any(D_log(:) ~= 0)
     legend('d_1','d_2','d_3');
     title('Disturbance signals vs time'); grid on;
 end
+
+% ---- Save logs for comparison ----
+pid_results.t  = t_log;
+pid_results.Z  = Z_log;
+pid_results.X  = X_log;
+pid_results.Y  = Y_log;
+
+save('pid_results.mat','pid_results');
