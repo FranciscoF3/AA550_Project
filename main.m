@@ -28,6 +28,7 @@ U_log = zeros(mpc.u_dim, N);
 t_log = zeros(1, N);
 X_log = zeros(1, N);
 Y_log = zeros(1, N);
+Phi_log = zeros(1, N);
 D_log = zeros(3, N);    % disturbance log (3×N), like your groupmate
 
 % Reference state z_r, u_r (for linearization and velocity reference)
@@ -133,6 +134,7 @@ for s_idx = 1:N
     robot = robot_state_update(robot, z, ref, s_idx);
     X_log(s_idx) = robot.x_cur;
     Y_log(s_idx) = robot.y_cur;
+    Phi_log(s_idx) = robot.phi_cur;
 
     % --- Progress printout ---
     percent = floor(s_idx / N * 100);
@@ -269,3 +271,5 @@ mpc_results.X  = X_log;
 mpc_results.Y  = Y_log;
 
 save('mpc_results.mat','mpc_results');
+animate_robot_path(X_log, Y_log, Phi_log, x_ref, y_ref, t_log, robot);
+writeAnimation('MPC_robot.gif')
