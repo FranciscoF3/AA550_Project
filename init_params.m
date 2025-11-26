@@ -40,12 +40,12 @@ function [robot, mpc, sim] = init_params()
     robot.mass = 80;       % [kg]      
     robot.Jz   = 10;       % [kg m^2]  
     robot.r    = 0.1524;   % wheel radius [m]
-    robot.L    = 0.241;    % half-length in x [m]
-    robot.l    = 0.481;    % half-width in y [m]
+    robot.l    = 0.241;    % half-length in x [m]
+    robot.L    = 0.481;    % half-width in y [m]
 
     % Friction / motor model parameters (optional, TODO)
-    robot.Fc = 0;          % Coulomb friction (placeholder)
-    robot.Fv = 0;          % Viscous friction (placeholder)
+    % robot.Fc = 0;          % Coulomb friction (placeholder)
+    % robot.Fv = 0;          % Viscous friction (placeholder)
 
     % Robot position (initialize at (0, -rho))
     robot.x_cur   = 0;
@@ -59,7 +59,8 @@ function [robot, mpc, sim] = init_params()
     mpc.u_dim = 3;      % control input dimension
     
     % Moving corrider
-    mpc.sigma_dim = 6; % moving corrider params 5
+    % mpc.sigma_dim = 5; % moving corrider params 5
+    mpc.sigma_dim = 6; % moving corrider params 5 + obstacle avoidance
 
     % MPC sampling & horizon
     mpc.Ts = 0.1;   % control period[s]
@@ -67,12 +68,11 @@ function [robot, mpc, sim] = init_params()
     mpc.Ch = 5;     % control horizon (<= Np) 10
 
     % Cost weights 
-    mpc.W1 = 280;  % weight for lateral error ey
-    mpc.W2 = 80;   % weight for heading error epsi
-    mpc.W3 = diag([80 40 10]);
-    mpc.W4_corridor = eye(mpc.sigma_dim-1)*100;
-    mpc.W4_obs = 5;
-    mpc.W5 = 1;
+    mpc.W1 = 40;  % weight for lateral error ey
+    mpc.W2 = 40;   % weight for heading error epsi
+    mpc.W3 = diag([80 80 10]);
+    mpc.W4 = eye(mpc.sigma_dim)*60;
+    mpc.W5 = 0;
     mpc.W6 = 1;
 
     % Input constraints 
@@ -85,42 +85,43 @@ function [robot, mpc, sim] = init_params()
                   3];      % j_y
 
     % State constraints
-    mpc.z_min = [-0.5;      % e_y
-                 -0.35;     % e_phi
+    mpc.z_min = [-1.5;      % e_y
+                 -0.5;     % e_phi
                   0.1;      % v_x
                  -0.5;      % v_y
                  -1.5;      % w
                  -0.4;      % a_x
                  -0.4];     % a_y
 
-    mpc.z_max = [ 0.5;      % e_y
-                  0.35;     % e_phi
+    mpc.z_max = [ 1.5;      % e_y
+                  0.5;     % e_phi
                   1.2;      % v_x
                   0.5;      % v_y
-                  145;      % w??
+                  145;      % w
                   0.4;      % a_x
                   0.4];     % a_y
 
-    % ----- Obstacle settings -----
-    mpc.use_obstacle = true;
-    
-    % Single circular obstacle
-    mpc.obs.cx = -4.8;     % obstacle center x [m]
-    mpc.obs.cy = 1.0;      % obstacle center y [m]
-    mpc.obs.R_safe = 0.3;  % safety radius: distance from robot center to obstacle center >= R_safe
-    
-    % % Avoiding cost 
-    % mpc.obs.W = 5.0;       % 
-    % mpc.obs.eps = 0.1;     % 
-    
-    % Linearization params
-    mpc.obs.nx = 0;
-    mpc.obs.ny = 0;
+    % ---------------------------------------------------------------------
+    % Obstacle soft-avoidance parameters (for cost shaping)
+    % ---------------------------------------------------------------------
+    % number of obstacle
+    mpc.nObs = 1;
+
+    % obstacle position on path (s)
+    mpc.obs(1).x    = -5.0;    % [meter]
+    mpc.obs(1).y    = 0.0;    % [meter]
+
+    % max lateral bias ~ safety distance
+    mpc.obs(1).r     = 0.5;    % [meter]; right > 0, left < 0 
+
+    % impact area width (s)
+    mpc.obs(1).A = 1.2;           % desired peak lateral offset [m]  0.8
+    mpc.obs(1).Delta = 2.0 * mpc.obs(1).A;    % [meter]; generate bump at s0 ± 1m 
 
     % ---------------------------------------------------------------------
     % Simulation parameters
     sim.ds    = 0.1;     % s-domain scale resolution (meter)
     sim.v_ref = 0.7;      % reference speed along s
-    sim.n_lap = 1.1;        % number of laps
+    sim.n_lap = 1.0;        % number of laps
     sim.rho   = 5.0;      % radius [meter] 5 m
 end

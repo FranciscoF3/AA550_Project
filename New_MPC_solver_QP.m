@@ -1,4 +1,4 @@
-function u = New_MPC_solver_QP(z0, zr, Ad, Bd, Cd, mpc, ref_seq)
+function u = New_MPC_solver_QP(z0, zr_seq, Ad, Bd, Cd, mpc, ref_seq, s_idx)
 % New_MPC_solver_QP
 %   Quadprog-based MPC for space-based linearized model:
 %
@@ -10,22 +10,25 @@ function u = New_MPC_solver_QP(z0, zr, Ad, Bd, Cd, mpc, ref_seq)
 %   Cost per stage k = 1..Kh:
 %       W1*e_y(k)^2 + W2*e_\phi(k)^2
 %     + (v(k)-v_ref)' W3 (v(k)-v_ref)
-%     + sigma_corr(k)' W4_corridor sigma_corr(k)   (5 維 corridor slack)
-%     + W4_obs * sigma_obs(k)^2                   (1 維 obstacle slack)
-%     + W5 * ||u_k - u_{k-1||^2
+%     + sigma_k' W4 sigma_k
+%     + W5 * ||u_k - u_{k-1}||^2
 %
 %   Terminal cost:
 %       W6 * (e_y(Kh+1)^2 + e_\phi(Kh+1)^2)
 %
-%   sigma_k : sdim×1, 其中
-%       sigma_k(1:5) : corridor slack on z(1:5)
-%       sigma_k(6)   : obstacle slack
+%   Slacks sigma_k soften corridor constraints on z(1:5).
 %
-%   mpc struct 除了原本欄位外，建議加：
-%       mpc.W4_corridor (標量或 5x5)
-%       mpc.W4_obs      (標量)
-%   若未提供，則預設取 mpc.W4。
+%   INPUTS:
+%       z0  : current state (7x1)
+%       zr  : reference state for linearization (7x1)
+%       Ad,Bd,Cd : discrete linear model (Kh fixed)
+%       mpc : struct with fields:
+%             Kh, Ch, z_dim, u_dim, sigma_dim
+%             W1..W6, u_min/u_max, z_min/z_max
+%             (optional) u_prev (3x1)
 %
+%   OUTPUT:
+%       u   : optimal control input at current step (3x1)
 
     % ---------- MPC parameters ----------
     Kh   = mpc.Kh;         % prediction horizon
@@ -33,11 +36,7 @@ function u = New_MPC_solver_QP(z0, zr, Ad, Bd, Cd, mpc, ref_seq)
 
     n    = mpc.z_dim;      % state dimension (7)
     m    = mpc.u_dim;      % input dimension (3)
-    sdim = mpc.sigma_dim;  % number of slacks per stage (>=6 for obstacle)
-
-    if sdim < 6
-        error('New_MPC_solver_QP: sigma_dim must be at least 6 (5 corridor + 1 obstacle).');
-    end
+    sdim = mpc.sigma_dim;  % number of slacks per stage (usually 5)
 
     % Constraints
     u_min = mpc.u_min;
@@ -49,26 +48,9 @@ function u = New_MPC_solver_QP(z0, zr, Ad, Bd, Cd, mpc, ref_seq)
     W1 = mpc.W1;   % ey
     W2 = mpc.W2;   % ephi
     W3 = mpc.W3;   % 3x3 on [vx; vy; w]
+    W4 = mpc.W4;   % slack weight (scalar or sdim×sdim)
     W5 = mpc.W5;   % Δu penalty
     W6 = mpc.W6;   % terminal ey,ephi
-
-    % ---- Slack weights (不再混在同一個 W4 裡) ----
-    if isfield(mpc, 'W4_corridor')
-        W4_corr = mpc.W4_corridor;
-    else
-        % backward compatible: 用原本的 W4
-        W4_corr = mpc.W4;
-    end
-    if isfield(mpc, 'W4_obs')
-        W4_obs = mpc.W4_obs;
-    else
-        % 若沒給，預設比 corridor 再重一些
-        if isscalar(mpc.W4)
-            W4_obs = 10 * mpc.W4;
-        else
-            W4_obs = 10;   % 隨便給個合理值，建議你之後自己 tune
-        end
-    end
 
     % Previous input for Δu term
     if isfield(mpc, 'u_prev')
@@ -77,26 +59,27 @@ function u = New_MPC_solver_QP(z0, zr, Ad, Bd, Cd, mpc, ref_seq)
         u_prev = zeros(m,1);
     end
 
-    % ------------ obstacle params ----------------
-    obs_x = mpc.obs.cx;
-    obs_y = mpc.obs.cy;
-    obs_r = mpc.obs.R_safe;
-    nx    = mpc.obs.nx;
-    ny    = mpc.obs.ny;
-
-    % reference path (world frame)
-    xr_vec   = ref_seq.x_r(:);    % Kh×1
-    yr_vec   = ref_seq.y_r(:);
-    phi_vec  = ref_seq.phi_r(:);
-
     % Reference velocity from zr
-    v_ref = zr(3:5);      % [v_x_ref; v_y_ref; w_ref]
+    % v_ref = zr(3:5);      % [v_x_ref; v_y_ref; w_ref]
+
+    % % ---- Soft obstacle avoidance profile (ey_safe, Wobs) ----
+    % % if mpc.obs is set，generate bump；or -> 0
+    % if isfield(mpc, 'obs') && isfield(mpc, 'nObs') && mpc.nObs > 0
+    %     [ey_safe, Wobs] = build_obstacle_bumps(ref_seq, mpc, s_idx);
+    % else
+    %     ey_safe = zeros(1, Kh);
+    %     Wobs    = zeros(1, Kh);
+    % end
 
     % ---------- Decision variable x = [Z_stack; U_stack; Sig_stack] ----------
+    %   Z_stack = [z_1; ...; z_{Kh+1}]        (n*(Kh+1) x 1)
+    %   U_stack = [u_1; ...; u_{Kh}]          (m*Kh x 1)
+    %   Sig_stack = [sigma_1; ...; sigma_Kh]  (sdim*Kh x 1)
     NZ = n * (Kh+1);
     NU = m * Kh;
     NS = sdim * Kh;
-    Nx = NZ + NU + NS;
+    Nobs = 1 * Kh;
+    Nx = NZ + NU + NS + Nobs;
 
     % index helpers into x
     idxZ = @(k) (k-1)*n + (1:n);                 % indices for z_k
@@ -114,38 +97,52 @@ function u = New_MPC_solver_QP(z0, zr, Ad, Bd, Cd, mpc, ref_seq)
     Q(3:5,3:5) = W3;       % [vx, vy, w]
 
     % reference full-state vector used in (z_k - z_ref)
-    z_ref      = zeros(n,1);
-    z_ref(3:5) = v_ref;
-    Qzref      = Q * z_ref;
+    % z_ref       = zeros(n,1);
+    % z_ref(3:5)  = v_ref;
+    % Qzref       = Q * z_ref;
 
-    % 1) Stage costs: state tracking + slack (拆成 corridor / obstacle)
+    N_ref = size(zr_seq, 2);   % total number of reference samples
+    
+    % Preallocate local reference for this horizon
+    z_ref_seq = zeros(n, Kh+1);
+    
+    % Wrap-around slicing for circular path
+    for k = 1:(Kh+1)
+        idx = s_idx + (k-1);
+        if idx > N_ref
+            idx = idx - N_ref;   % wrap around for circle
+        end
+        z_ref_seq(:, k) = zr_seq(:, idx);
+    end
+
+    % z_ref_seq = zr_seq(:, s_idx: s_idx+Kh);
+
+    % 1) Stage costs: state tracking + slack
     for k = 1:Kh
+
         iz = idxZ(k);
         is = idxS(k);
 
         % (z_k - z_ref)' Q (z_k - z_ref)
+        % expands to z_k'Qz_k - 2 z_ref'Q z_k + const
+        z_ref_k  = z_ref_seq(:, k);   
+        Qzref  = Q * z_ref_k;
         H(iz,iz) = H(iz,iz) + 2*Q;
         f(iz)    = f(iz)    - 2*Qzref;
 
-        % ---- corridor slack sigma(1:5) ----
-        is_corr = is(1:5);
-        if isscalar(W4_corr)
-            H(is_corr, is_corr) = H(is_corr, is_corr) + 2*W4_corr*eye(5);
-        else
-            % 如果你給的是 6x6 或更大，只取前 5x5 給 corridor 用
-            Wc = W4_corr;
-            if all(size(Wc) == [sdim sdim])
-                Wc = Wc(1:5, 1:5);
-            elseif ~all(size(Wc) == [5 5])
-                error('W4_corridor must be scalar, 5x5, or sdim x sdim.');
-            end
-            H(is_corr, is_corr) = H(is_corr, is_corr) + 2*Wc;
-        end
+        % wobs_k = Wobs(k);
+        % if wobs_k > 0
+        %     idx_ey = iz(1);            
+        %     ey_s   = ey_safe(k);       
+        % 
+        %     % Wobs(k) * (e_y - ey_s)^2
+        %     H(idx_ey, idx_ey) = H(idx_ey, idx_ey) + 2*wobs_k;
+        %     f(idx_ey)         = f(idx_ey)         - 2*wobs_k*ey_s;
+        % end
 
-        % ---- obstacle slack sigma(6) ----
-        s_obs = is(6);
-        % W4_obs 一般是 scalar
-        H(s_obs, s_obs) = H(s_obs, s_obs) + 2*W4_obs;
+        % sigma_k' W4 sigma_k
+        H(is,is) = H(is,is) + 2*W4;
+
     end
 
     % 2) Δu penalty: W5 * sum_k ||u_k - u_{k-1}||^2
@@ -158,6 +155,7 @@ function u = New_MPC_solver_QP(z0, zr, Ad, Bd, Cd, mpc, ref_seq)
                 f(iu)    = f(iu)    - 2*W5*u_prev;
             else
                 iu_prev = idxU(k-1);
+                % ||u_k - u_{k-1}||^2
                 H(iu,iu)           = H(iu,iu)           + 2*W5*eye(m);
                 H(iu_prev,iu_prev) = H(iu_prev,iu_prev) + 2*W5*eye(m);
                 H(iu,iu_prev)      = H(iu,iu_prev)      - 2*W5*eye(m);
@@ -174,6 +172,10 @@ function u = New_MPC_solver_QP(z0, zr, Ad, Bd, Cd, mpc, ref_seq)
     H(izT,izT) = H(izT,izT) + 2*Q_T;
 
     % ---------- Equality constraints Aeq x = beq ----------
+    % 1) z_1 = z0
+    % 2) z_{k+1} = Ad z_k + Bd u_k + Cd
+    % 3) control horizon: for k > Ch, u_k = u_Ch
+
     nEq_base = n*(Kh+1);
     Aeq = zeros(nEq_base, Nx);
     beq = zeros(nEq_base, 1);
@@ -195,6 +197,7 @@ function u = New_MPC_solver_QP(z0, zr, Ad, Bd, Cd, mpc, ref_seq)
 
         for i = 1:n
             row = row+1;
+            % z_{k+1}(i) - Ad(i,:)*z_k - Bd(i,:)*u_k = Cd(i)
             Aeq(row, izk1(i)) = 1;
             Aeq(row, izk)     = Aeq(row, izk) - Ad(i,:);
             Aeq(row, iu)      = Aeq(row, iu)  - Bd(i,:);
@@ -226,12 +229,11 @@ function u = New_MPC_solver_QP(z0, zr, Ad, Bd, Cd, mpc, ref_seq)
 
     % ---------- Inequality constraints Aineq x <= bineq ----------
     % 1) Input bounds u_min <= u_k <= u_max
-    % 2) Soft corridor for z(1:5) using slacks sigma(1:5)
+    % 2) Soft corridor for z(1:5) using slacks sigma
     % 3) Hard bounds on z(6:7)
     % 4) Slack >= 0
-    % 5) Obstacle avoidance with slack sigma(6)
 
-    max_rows = (2*m + 2*5 + 2*(n-5) + 1 + sdim) * Kh;
+    max_rows = (2*m + 2*5 + 2*(n-5) + sdim + 1) * Kh;
     Aineq = zeros(max_rows, Nx);
     bineq = zeros(max_rows, 1);
     rI = 0;
@@ -240,73 +242,56 @@ function u = New_MPC_solver_QP(z0, zr, Ad, Bd, Cd, mpc, ref_seq)
     for k = 1:Kh
         iu = idxU(k);
         for i = 1:m
+            % u_i(k) <= u_max(i)
             rI = rI+1;
             Aineq(rI, iu(i)) =  1;
             bineq(rI)        =  u_max(i);
-
+            % u_i(k) >= u_min(i) => -u_i(k) <= -u_min(i)
             rI = rI+1;
             Aineq(rI, iu(i)) = -1;
             bineq(rI)        = -u_min(i);
         end
     end
 
-    % 2) Corridor + 3) hard bounds + 5) obstacle
+    % 2) Corridor with slacks on z(1:5), 3) hard bounds on z(6:7)
     for k = 1:Kh
         iz = idxZ(k);
         is = idxS(k);
 
-        % corridor slacks on z(1:5)
+        % softened constraints for z(1:5)
         for i = 1:5
-            s_idx = is(i);
+            is_i = is(i);
 
-            % lower: z_i >= z_min(i) - s_i  -> -z_i - s_i <= -z_min(i)
+            % lower: z_i >= z_min(i) - s_i  ->  -z_i - s_i <= -z_min(i)
             rI = rI+1;
             Aineq(rI, iz(i)) = -1;
-            Aineq(rI, s_idx) = -1;
+            Aineq(rI, is_i)  = -1;
             bineq(rI)        = -z_min(i);
 
-            % upper: z_i <= z_max(i) + s_i  ->  z_i - s_i <= z_max(i)
+            % upper: z_i <= z_max(i) + s_i  ->   z_i - s_i <= z_max(i)
             rI = rI+1;
             Aineq(rI, iz(i)) =  1;
-            Aineq(rI, s_idx) = -1;
+            Aineq(rI, is_i)  = -1;
             bineq(rI)        =  z_max(i);
         end
 
         % hard bounds for z(6:7)
         for i = 6:n
+            % z_i >= z_min(i) -> -z_i <= -z_min(i)
             rI = rI+1;
             Aineq(rI, iz(i)) = -1;
             bineq(rI)        = -z_min(i);
 
+            % z_i <= z_max(i)
             rI = rI+1;
             Aineq(rI, iz(i)) =  1;
             bineq(rI)        =  z_max(i);
         end
 
-        % obstacle avoidance with slack sigma_obs = sigma(6)
-        xr_k  = xr_vec(k);
-        yr_k  = yr_vec(k);
-        phi_k = phi_vec(k);
 
-        c0 = nx*(xr_k - obs_x) + ny*(yr_k - obs_y);
-        c1 = -nx*sin(phi_k) + ny*cos(phi_k);
-
-        % 避免係數太小造成數值病態
-        if abs(c1) < 1e-3
-            c1 = sign(c1 + 1e-6) * 1e-3;
-        end
-
-        s_obs = is(6);  % 第六維 slack
-
-        % c0 + c1*e_y >= obs_r - sigma_obs
-        % -> -c1*e_y - sigma_obs <= c0 - obs_r
-        rI = rI+1;
-        Aineq(rI, iz(1)) = -c1;      % e_y
-        Aineq(rI, s_obs) = -1;       % -sigma_obs
-        bineq(rI)        = c0 - obs_r;
     end
 
-    % 4) Slack >= 0 -> -sigma <= 0  (所有 slack 都非負)
+    % 4) Slack >= 0 -> -sigma <= 0
     for k = 1:Kh
         is = idxS(k);
         for i = 1:sdim
@@ -320,17 +305,32 @@ function u = New_MPC_solver_QP(z0, zr, Ad, Bd, Cd, mpc, ref_seq)
     bineq = bineq(1:rI);
 
     % ---------- Solve QP ----------
-    % 強制全部都是實數，避免 tiny imaginary 傳下去害 X_log/Y_log 變 complex
-    H     = real((H + H')/2);
-    f     = real(f);
-    Aeq   = real(Aeq);
-    beq   = real(beq);
-    Aineq = real(Aineq);
-    bineq = real(bineq);
+    H = (H + H')/2;  % enforce symmetry
 
     opts = optimoptions('quadprog', ...
         'Display', 'off', ...
         'Algorithm', 'interior-point-convex');
+
+    % ====== DEBUG: check where complex comes from ======
+    % if ~isreal(H)
+    %     warning('H is complex. max imag = %g', max(abs(imag(H(:)))));
+    % end
+    % if ~isreal(f)
+    %     warning('f is complex. max imag = %g', max(abs(imag(f(:)))));
+    % end
+    % if ~isreal(Aeq)
+    %     warning('Aeq is complex. max imag = %g', max(abs(imag(Aeq(:)))));
+    % end
+    % if ~isreal(beq)
+    %     warning('beq is complex. max imag = %g', max(abs(imag(beq(:)))));
+    % end
+    % if ~isreal(Aineq)
+    %     warning('Aineq is complex. max imag = %g', max(abs(imag(Aineq(:)))));
+    % end
+    % if ~isreal(bineq)
+    %     warning('bineq is complex. max imag = %g', max(abs(imag(bineq(:)))));
+    % end
+
 
     [x_opt, ~, exitflag] = quadprog(H, f, Aineq, bineq, Aeq, beq, [], [], [], opts);
 
@@ -339,6 +339,7 @@ function u = New_MPC_solver_QP(z0, zr, Ad, Bd, Cd, mpc, ref_seq)
         warning('New_MPC_solver_QP: quadprog failed, using previous input.');
         u = u_prev;
     else
+        % extract u_1 from U_stack
         U_stack = x_opt(NZ+1 : NZ+NU);
         u = U_stack(1:m);
     end
