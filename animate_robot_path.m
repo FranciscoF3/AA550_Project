@@ -1,82 +1,106 @@
-function animate_robot_path(X, Y, Phi, X_ref, Y_ref, t_log, robot, save_video, video_name)
-%ANIMATE_ROBOT_PATH  播放 2D 上俯視的軌跡動畫
+function animate_robot_path(X_log, Y_log, Phi_log, x_ref, y_ref, t_log, robot, mpc, save_video, video_name)
+%ANIMATE_ROBOT_PATH  Play a 2D top-down animation of the robot trajectory.
 %
-%   X, Y      : 1×N 機器人實際位置 (global frame)
-%   Phi       : 1×N 機器人朝向 (rad, global frame)
-%   X_ref,Y_ref : 1×N 參考軌跡
-%   robot     : 結構，需包含 robot.L, robot.l（半長、半寬）
-%   save_video: (optional) true/false 是否輸出 mp4
-%   video_name: (optional) 檔名，例如 'omni_mpc_demo.mp4'
+%   X_log, Y_log: 1×N actual robot positions (global frame)
+%   Phi_log     : 1×N robot heading (rad, global frame)
+%   x_ref,y_ref : 1×N reference trajectory
+%   robot       : struct containing robot.L and robot.l (half-length, half-width)
+%   save_video  : (optional) true/false to export mp4
+%   video_name  : (optional) filename such as 'omni_mpc_demo.mp4'
 
-    if nargin < 8
+    if nargin < 9
         save_video = false;
     end
-    if nargin < 9
+    if nargin < 10
         video_name = 'omni_mpc_demo.mp4';
     end
 
-    N = numel(X);
+    N = numel(X_log);
 
-    % 以 robot 幾何參數畫出車體外框（body frame 下）
-    L = robot.L;   % 半長
-    l = robot.l;   % 半寬
+    % Draw robot body outline (in body frame)
+    L = robot.L;   % half-length
+    l = robot.l;   % half-width
 
     body_shape = [...
-        -L, -L,  L,  L;  % x 座標（車體座標）
-        -l,  l,  l, -l]; % y 座標
+        -L, -L,  L,  L;  % x-coordinates (body frame)
+        -l,  l,  l, -l]; % y-coordinates
 
-    % ----- 建立圖形 -----
+    % ----- Create figure -----
     figure; clf;
     hold on; grid on; axis equal;
 
-    % 畫參考路徑
-    plot(X_ref, Y_ref, 'k--', 'LineWidth', 1.2);
+    % Reference path
+    p1 = plot(x_ref, y_ref, 'k--', 'LineWidth', 1.2);
 
-    % 設定顯示邊界（稍微多留一點 margin）
+    obs = mpc.obs(1);
+    cx = obs.x;
+    cy = obs.y;
+    R  = obs.r;
+    
+    % plot obstacle center（with x）
+    p2 = plot(cx, cy, 'rx', 'LineWidth', 2, 'MarkerSize', 10);
+    
+    % draw obstacle area
+    theta = linspace(0, 2*pi, 200);
+    x_circle = cx + R * cos(theta);
+    y_circle = cy + R * sin(theta);
+    p3 = plot(x_circle, y_circle, 'r-', 'LineWidth', 1.5);
+    
+    % fill with red
+    patch(x_circle, y_circle, 'r', ...
+          'FaceAlpha', 0.1, ...   
+          'EdgeColor', 'none');
+    % start / end
+    plot(X_log(1),   Y_log(1),   'go', 'MarkerSize', 10, 'MarkerFaceColor', 'g');
+    plot(X_log(end), Y_log(end), 'ms', 'MarkerSize', 10, 'MarkerFaceColor', 'm');
+
+    % Display window (with extra margin)
     margin = 1.0;
-    xmin = min([X_ref(:); X(:)]) - margin;
-    xmax = max([X_ref(:); X(:)]) + margin;
-    ymin = min([Y_ref(:); Y(:)]) - margin;
-    ymax = max([Y_ref(:); Y(:)]) + margin;
+    xmin = min([x_ref(:); X_log(:)]) - margin;
+    xmax = max([x_ref(:); X_log(:)]) + margin;
+    ymin = min([y_ref(:); Y_log(:)]) - margin;
+    ymax = max([y_ref(:); Y_log(:)]) + margin;
     axis([xmin xmax ymin ymax]);
+    
+    legend([p1 p2, p3], {'Reference path', 'Obstacle center', 'Obstacle region'});
 
     xlabel('X [m]');
     ylabel('Y [m]');
     title('Omni-directional Robot Path Tracking (MPC)');
 
-    % 實際軌跡線
+    % Actual trajectory line
     h_traj = plot(NaN, NaN, 'b-', 'LineWidth', 1.5);
 
-    % 車體 patch
-    h_body = patch(NaN, NaN, [0.3 0.7 1.0]);  % 顏色可改
+    % Robot body patch
+    h_body = patch(NaN, NaN, [0.3 0.7 1.0]); 
 
-    % 前方朝向的小線（車頭）
+    % Heading direction indicator
     h_heading = plot(NaN, NaN, 'r-', 'LineWidth', 2);
 
-    % 如要錄影，先準備 frame 陣列
+    % Preallocate video frames
     if save_video
         F(N) = struct('cdata',[], 'colormap',[]);
     end
 
     for k = 1:N
-        % 更新軌跡線（從起點到目前）
-        set(h_traj, 'XData', X(1:k), 'YData', Y(1:k));
+        % Update trajectory (from start to current point)
+        set(h_traj, 'XData', X_log(1:k), 'YData', Y_log(1:k));
 
-        % 旋轉 + 平移車體外框
-        R = [cos(Phi(k)) -sin(Phi(k));
-             sin(Phi(k))  cos(Phi(k))];
+        % Rotation + translation of robot body
+        R = [cos(Phi_log(k)) -sin(Phi_log(k));
+             sin(Phi_log(k))  cos(Phi_log(k))];
 
         body_world = R * body_shape;
-        bx = body_world(1,:) + X(k);
-        by = body_world(2,:) + Y(k);
+        bx = body_world(1,:) + X_log(k);
+        by = body_world(2,:) + Y_log(k);
         set(h_body, 'XData', bx, 'YData', by);
 
-        % 畫出車頭方向（例如車體中心往前畫一小段）
-        head_len = L * 1.5;
-        head_pt = [head_len; 0];   % 在 body frame 的一個點（前方）
+        % Heading line (extend from center forward)
+        head_len = L * 2.2;
+        head_pt = [head_len; 0];   % point in body frame
         head_world = R * head_pt;
-        hx = [X(k), X(k) + head_world(1)];
-        hy = [Y(k), Y(k) + head_world(2)];
+        hx = [X_log(k), X_log(k) + head_world(1)];
+        hy = [Y_log(k), Y_log(k) + head_world(2)];
         set(h_heading, 'XData', hx, 'YData', hy);
 
         drawnow;
@@ -84,19 +108,19 @@ function animate_robot_path(X, Y, Phi, X_ref, Y_ref, t_log, robot, save_video, v
         if save_video
             F(k) = getframe(gcf);
         end
-
+        % Real-time playback based on log time
         if k > 1
             dt = t_log(k) - t_log(k-1);
             if dt > 0
-                pause(dt);   % 真正依照物理時間播放
+                pause(dt);   
             end
         end
     end
 
-    % ----- 輸出影片 -----
+    % ----- Export video -----
     if save_video
         v = VideoWriter(video_name, 'MPEG-4');
-        v.FrameRate = 30;   % 播放速度
+        v.FrameRate = 15;   
         open(v);
         writeVideo(v, F);
         close(v);
