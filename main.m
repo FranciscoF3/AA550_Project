@@ -62,8 +62,21 @@ control_period = mpc.Ts;   % = 0.1s
 last_percent = 0;
 
 % ---------------- Disturbance initialization ----------------
-d     = zeros(3,1);   % 3×1 disturbance: e.g. [d_vx; d_vy; d_w] or similar
+d     = zeros(3,1);   % 3×1 disturbance: e.g. [d_vx; d_vy; d_w]
 cfg_d = [];           % configuration struct if needed inside disturbance_step
+
+
+% ---------- Pre-generate a shared disturbance profile ----------
+rng(0);                      % fixed seed for reproducibility
+dt_nom     = ds / sim.v_ref; % nominal time step for disturbance generation
+d_gen      = zeros(3,1);
+D_profile  = zeros(3, N);
+
+for k = 1:N
+    d_gen = disturbance_step(d_gen, dt_nom, cfg_d);
+    D_profile(:,k) = d_gen;
+end
+
 
 % =========================================================================
 % Start simulation
@@ -101,13 +114,13 @@ for s_idx = 1:N
         t_last_u = t;
     end
 
-    % ------ Disturbance update & logging ------
-    d = disturbance_step(d, dt, cfg_d);   % 3×1 disturbance at this step
+    % ------ Disturbance from pre-generated profile ------
+    d = D_profile(:, s_idx);
     D_log(:, s_idx) = d;
 
     % ------ Nonlinear propagation with disturbance ------
-    % You must have nonlinear_step defined as: nonlinear_step(z,u,ds,ref,d)
     z_next = nonlinear_step(z, u, ds, ref, d);
+
 
     % Update the state for the next iteration
     z = z_next;
@@ -202,7 +215,7 @@ title('Lateral jerk j_y(t)');
 grid on;
 
 % =========================================================================
-%  Plot 4: all states (debug)
+%  Plot 4: all states 
 % =========================================================================
 figure;
 plot(t_log, Z_log', 'LineWidth', 1.0);
@@ -248,3 +261,11 @@ ylabel('d');
 legend('d_1','d_2','d_3');
 title('Disturbance signals vs time');
 grid on;
+
+% ---- Save logs for comparison ----
+mpc_results.t  = t_log;
+mpc_results.Z  = Z_log;
+mpc_results.X  = X_log;
+mpc_results.Y  = Y_log;
+
+save('mpc_results.mat','mpc_results');
