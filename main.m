@@ -29,7 +29,7 @@ t_log = zeros(1, N);
 X_log = zeros(1, N);
 Y_log = zeros(1, N);
 Phi_log = zeros(1, N);
-D_log = zeros(3, N);    % disturbance log (3×N), like your groupmate
+D_log = zeros(3, N);    % disturbance log (3×N)
 
 % Reference state z_r, u_r (for linearization and velocity reference)
 z_r = [0;
